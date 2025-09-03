@@ -51,4 +51,3 @@ n Analytics
 - The `referrals` table enables queries to count how many referrals each user has.
 n License
 MIT
-
