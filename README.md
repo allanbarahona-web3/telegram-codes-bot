@@ -86,3 +86,24 @@ CSV export provides quick reporting and is the bridge for future migration to Sa
 
 📄 License
 MIT
+
+---
+
+## QA Freeze / Version
+- **Current QA Freeze:** `v0.1.0` (QA – do not modify)
+- Tester: Karen (Qase, device testing)
+- Scope: referrals core, balance/payouts, admin, ES/EN.
+
+## Run locally (dev)
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python telegram_referrals_bot.py
+
+Environment
+
+TELEGRAM_BOT_TOKEN (required)
+
+DATABASE_URL (optional, default: local codes.db)
+
+DEFAULT_LOCALE (es|en)
