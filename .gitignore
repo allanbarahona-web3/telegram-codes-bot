@@ -10,3 +10,5 @@ __pycache__/
 
 # Base de datos local (no queremos subir usuarios reales)
 codes.db
+.env.*
+!.env.example
