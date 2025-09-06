@@ -1,26 +1,17 @@
 # Telegram Codes Bot
 
 A Telegram bot that assigns each user a unique referral code based on their verified phone number.  
-It also supports referral campaigns, provides invite links to groups that are one-time use and expire automatically, and now includes **CSV export** for admins.
+It supports referral campaigns, provides invite links to groups that are one-time use and expire automatically, and includes **CSV export** for admins.
 
 ---
 
 ## ✨ Features
 - **Unique user codes:** each user receives a random, unique code with a country prefix (e.g., `CR-AB12-CD34`).
-- **Phone verification:** users must share their phone number via Telegram’s native contact button (no manual typing).
+- **Phone verification:** users must share their phone number via Telegram’s native contact button.
 - **Code recovery:** retrieve your code anytime with `/mycode` or the inline button 🔑 *Remember my code*.
-- **Referral campaigns:**
-  - Users share their codes with friends.
-  - New users enter the code of the inviter.
-  - The bot stores relationships in the database (`referrals` table).
-- **Group access control:**
-  - Only users who verify their phone and get a code can receive a group invite.
-  - Invite links are single-use and expire automatically after a set number of hours.
-- **CSV Export (admin only):**
-  - `/exportcsv` generates three CSV files in the `exports/` folder:
-    - `users-<timestamp>.csv`
-    - `referrals-<timestamp>.csv`
-    - `campaigns-<timestamp>.csv`
+- **Referral campaigns:** track inviter/invitee relationships in the database.
+- **Group access control:** invite links are single-use and expire after a defined TTL.
+- **CSV Export (admin only):** `/exportcsv` generates three CSVs in the `exports/` folder (`users-<ts>.csv`, `referrals-<ts>.csv`, `campaigns-<ts>.csv`).
 
 ---
 
@@ -32,75 +23,84 @@ It also supports referral campaigns, provides invite links to groups that are on
 ---
 
 ## 🔧 Installation
+
 ```bash
 git clone https://github.com/<your-username>/telegram-codes-bot.git
 cd telegram-codes-bot
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-🔑 Configuration
-Create a .env file in the root folder with the following variables:
 
-env
-Copiar código
-BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx
+🔑 Configuration
+
+Create a .env file in the root folder with:
+
+TELEGRAM_BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx
 DEFAULT_REGION=UNKN
 GROUP_CHAT_ID=-1001234567890
 INVITE_TTL_HOURS=12
 ADMIN_USER_IDS=123456789
-BOT_TOKEN → your bot token from BotFather.
 
-DEFAULT_REGION → fallback country prefix if a phone number does not include +code.
 
-GROUP_CHAT_ID → the target group’s chat_id (starts with -100…) where the bot is admin.
+TELEGRAM_BOT_TOKEN: your bot token from BotFather
 
-INVITE_TTL_HOURS → how many hours the group invite link remains valid.
+DEFAULT_REGION: fallback prefix if number has no country code
 
-ADMIN_USER_IDS → comma-separated list of Telegram user IDs with admin permissions (e.g., /exportcsv).
+GROUP_CHAT_ID: target group’s chat_id (bot must be admin)
+
+INVITE_TTL_HOURS: invite link lifetime (hours)
+
+ADMIN_USER_IDS: comma-separated Telegram IDs with admin rights
 
 ▶️ Running the bot
-bash
-Copiar código
-python hello.py
+python telegram_referrals_bot.py
+
 🗃️ Database schema
-users table
+
+users
 
 user_id, phone, code, assigned_at, country_code
 
-referrals table
 
-Tracks referral relationships between inviter (referrer_user_id) and invited (referee_user_id).
+referrals
 
-campaigns table
+referrer_user_id, referee_user_id
 
-Supports multiple referral campaigns with different reward rules.
+
+campaigns
+
+id, name, rules...
 
 📊 Analytics
-Codes include the country prefix (CR, MX, US) or UNKN if not detected.
 
-The users table stores country_code, useful for country-based reporting.
+Codes include country prefix (CR, MX, US) or UNKN.
 
-The referrals table enables queries to count how many referrals each user has.
+users table stores country_code for reporting.
 
-CSV export provides quick reporting and is the bridge for future migration to SaaS.
+referrals table enables queries for referral counts.
+
+CSV export = quick reporting + migration bridge to SaaS.
 
 📄 License
+
 MIT
 
----
+🧪 QA Freeze / Version
 
-## QA Freeze / Version
-- **Current QA Freeze:** `v0.1.0` (QA – do not modify)
-- Tester: Karen (Qase, device testing)
-- Scope: referrals core, balance/payouts, admin, ES/EN.
+Current QA Freeze: v0.1.0 (QA – do not modify)
 
-## Run locally (dev)
-```bash
+Tester: Karen (Qase, device testing)
+
+Scope: referrals core, balance/payouts, admin, ES/EN
+
+Run locally for QA:
+
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python telegram_referrals_bot.py
 
-Environment
+
+Environment variables:
 
 TELEGRAM_BOT_TOKEN (required)
 
