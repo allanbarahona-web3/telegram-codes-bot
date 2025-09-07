@@ -31,7 +31,6 @@ import phonenumbers   # phone number normalization
 
 # ================== Config ==================
 load_dotenv(".env.dev")
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "codes.db")
 ADMIN_USER_IDS = [x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
@@ -43,7 +42,6 @@ INVITE_TTL_HOURS = int(os.getenv("INVITE_TTL_HOURS", "12"))  # invite link valid
 # Earnings config
 COMMISSION_PER_APPROVED_CENTS = int(os.getenv("COMMISSION_PER_APPROVED_CENTS", "100"))
 CURRENCY = os.getenv("CURRENCY", "USD")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "BarmentechDEVbot")  # Bot username for DeepLink
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN not configured (.env)")
@@ -53,24 +51,6 @@ dp = Dispatcher()
 ACTIVE_CAMPAIGN_ID = 1
 
 # ================== Utilities ==================
-
-# Helper to create one-time invite links with expiration
-async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = 12) -> Optional[str]:
-    """
-    Requires the bot to be admin of the group with invite link creation permissions.
-    """
-    try:
-        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())
-        link = await bot.create_chat_invite_link(
-            chat_id=chat_id,
-            name=f"one-use-{user_id}",
-            expire_date=expires_at,
-            member_limit=1
-        )
-        return link.invite_link
-    except Exception as e:
-        logging.error(f"Failed to create invite link: {e}")
-        return None
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # excluding 0/O/1/I for readability
 
 
@@ -116,6 +96,49 @@ def e164(phone_raw: str, default_region: str = DEFAULT_REGION) -> Optional[str]:
 
 
 
+def country_code_from_phone(phone_raw: str, default_region: str = DEFAULT_REGION) -> str:
+    try:
+        parsed = phonenumbers.parse(phone_raw, None if phone_raw.strip().startswith("+") else default_region)
+        region = phonenumbers.region_code_for_number(parsed)
+        return region or "UNKN"
+    except Exception:
+        return "UNKN"
+
+
+# Helper to create one-time invite links with expiration
+async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = INVITE_TTL_HOURS) -> Optional[str]:
+    """
+    Requires the bot to be admin of the group with invite link creation permissions.
+    """
+    try:
+        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())
+        link = await bot.create_chat_invite_link(
+            chat_id=chat_id,
+            name=f"one-use-{user_id}",
+            expire_date=expires_at,
+            member_limit=1
+        )
+        return link.invite_link
+    except Exception as e:
+        print(f"[WARN] Could not create invite link: {e}")
+        return None
+
+
+# Notify admins via DM
+async def notify_admins(bot: Bot, text: str):
+    """
+    Sends a DM notification to each admin listed in ADMIN_USER_IDS.
+    """
+    for admin_id in ADMIN_USER_IDS:
+        try:
+            await bot.send_message(int(admin_id), text)
+        except Exception:
+            # Ignore DM errors (e.g., admin never started the bot)
+            pass
+
+
+# --- i18n: language detection + texts (EN/ES) ---
+def get_lang(user: types.User) -> str:
     """
     Returns 'es' if the user's Telegram app language is Spanish, otherwise 'en'.
     """
@@ -124,14 +147,6 @@ def e164(phone_raw: str, default_region: str = DEFAULT_REGION) -> Optional[str]:
 
 
 TEXTS = {
-    "your_affiliate_link": {
-        "en": "🔗 Your affiliate link: {link}",
-        "es": "🔗 Tu link de afiliado: {link}"
-    },
-    "affiliate_link_button": {
-        "en": "🔗 Get my affiliate link",
-        "es": "🔗 Obtener mi link de afiliado"
-    },
     "already_has_code": {
         "en": "You already have a code assigned. Tap the button to see it or enter a referral code:",
         "es": "Ya tienes un código asignado. Toca el botón para verlo o ingresa un código de referido:"
@@ -759,8 +774,6 @@ async def assign_or_get_code(user_id: int, phone_e164: str, prefix_override: str
 
 
 # ================== UI ==================
-def build_affiliate_link_for_code(code: str) -> str:
-    return f"https://t.me/{BOT_USERNAME}?start={code}"
 
 def share_phone_kb(lang: str):
     return ReplyKeyboardMarkup(
@@ -773,11 +786,7 @@ def share_phone_kb(lang: str):
 
 def remember_kb(lang: str):
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=TEXTS["remember_button"][lang], callback_data="remember_code")],
-            [InlineKeyboardButton(text=TEXTS["affiliate_link_button"][lang], callback_data="get_affiliate_link")],
-            [InlineKeyboardButton(text=TEXTS["group_link_button"][lang], callback_data="get_group_link")]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text=TEXTS["remember_button"][lang], callback_data="remember_code")]]
     )
 
 
@@ -805,60 +814,10 @@ def payout_methods_kb(lang: str):
 
 
 # ================== Handlers ==================
-# ======= Get group link on demand =======
-@dp.message(Command("group"))
-@dp.message(Command("grupo"))
-async def cmd_group(message: Message):
-    lang = get_lang(message.from_user)
-    if not GROUP_CHAT_ID:
-        await message.answer(t("group_missing_env", lang)); return
-    try:
-        member = await message.bot.get_chat_member(GROUP_CHAT_ID, message.from_user.id)
-        if getattr(member, "status", None) == "kicked":
-            await message.answer(t("banned_message", lang))
-            return
-    except Exception:
-        pass
-    invite = await create_one_time_invite(message.bot, GROUP_CHAT_ID, message.from_user.id, INVITE_TTL_HOURS)
-    if invite:
-        await message.answer(t("group_access", lang, hours=INVITE_TTL_HOURS, link=invite))
-    else:
-        await message.answer(t("group_invite_fail", lang))
-@dp.callback_query(F.data == "get_affiliate_link")
-async def cb_get_affiliate_link(q: CallbackQuery):
-    lang = get_lang(q.from_user)
-    code = await get_existing_code_by_user(q.from_user.id)
-    if not code:
-        await q.message.answer(t("mycode_missing", lang))
-        await q.answer()
-        return
-    aff = build_affiliate_link_for_code(code)
-    await q.message.answer(t("your_affiliate_link", lang, link=aff))
-    await q.answer()
-@dp.message(Command("mylink"))
-@dp.message(Command("milink"))
-async def mylink_cmd(message: Message):
-    lang = get_lang(message.from_user)
-    code = await get_existing_code_by_user(message.from_user.id)
-    if not code:
-        await message.answer(t("mycode_missing", lang))
-        return
-    aff = build_affiliate_link_for_code(code)
-    await message.answer(t("your_affiliate_link", lang, link=aff))
-def get_lang(user: types.User) -> str:
-    code = (user.language_code or "en").lower()
-    return "es" if code.startswith("es") else "en"
 
 @dp.message(CommandStart())
 async def on_start(message: Message):
     lang = get_lang(message.from_user)
-    referrer_code = None
-    # Detect DeepLink: /start <code>
-    if message.text and message.text.startswith("/start"):
-        parts = message.text.split()
-        if len(parts) == 2:
-            referrer_code = parts[1].strip()
-
     existing = await get_existing_code_by_user(message.from_user.id)
     if existing:
         await message.answer(t("already_has_code", lang), reply_markup=remember_kb(lang))
@@ -866,12 +825,6 @@ async def on_start(message: Message):
         if GROUP_CHAT_ID:
             await message.answer(t("group_ready", lang), reply_markup=group_link_button(lang))
         return
-
-    # Si llegó por DeepLink, guardar el referrer_code en el state (o en la DB si lo prefieres)
-    if referrer_code:
-        # Guardar en el objeto message para usarlo en el registro (ForceReply o phone handler)
-        message.referrer_code = referrer_code
-
     await message.answer(t("start_mobile_only", lang), reply_markup=share_phone_kb(lang))
 
 
@@ -890,7 +843,6 @@ async def on_contact(message: Message):
         return
 
     phone_e164 = e164(c.phone_number)
-    country_iso = country_code_from_phone(phone_e164) or "ZZ"
     if not phone_e164:
         await message.answer(t("invalid_number", lang))
         return
@@ -901,17 +853,10 @@ async def on_contact(message: Message):
         await message.answer(t("error", lang, err="Could not generate your code. Try again."))
         return
 
-    affiliate_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-    msg_affiliate = t("your_affiliate_link", lang).format(link=affiliate_link)
-
-    # Send verified phone, code, and affiliate link
     await message.answer(t("phone_verified", lang, region=region, code=code), reply_markup=ReplyKeyboardRemove())
-    await message.answer(msg_affiliate, parse_mode="Markdown")
-    await message.answer(t("mycode_has", lang, code=code))
     await message.answer(t("remember_offer", lang), reply_markup=remember_kb(lang))
     await message.answer(t("enter_inviter_code", lang), reply_markup=referral_button(lang))
 
-    # Always send group invite link after registration
     if GROUP_CHAT_ID:
         invite = await create_one_time_invite(message.bot, GROUP_CHAT_ID, message.from_user.id, INVITE_TTL_HOURS)
         if invite:
@@ -1327,4 +1272,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
