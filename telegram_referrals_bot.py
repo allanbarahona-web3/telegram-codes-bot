@@ -96,49 +96,6 @@ def e164(phone_raw: str, default_region: str = DEFAULT_REGION) -> Optional[str]:
 
 
 
-def country_code_from_phone(phone_raw: str, default_region: str = DEFAULT_REGION) -> str:
-    try:
-        parsed = phonenumbers.parse(phone_raw, None if phone_raw.strip().startswith("+") else default_region)
-        region = phonenumbers.region_code_for_number(parsed)
-        return region or "UNKN"
-    except Exception:
-        return "UNKN"
-
-
-# Helper to create one-time invite links with expiration
-async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = INVITE_TTL_HOURS) -> Optional[str]:
-    """
-    Requires the bot to be admin of the group with invite link creation permissions.
-    """
-    try:
-        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())
-        link = await bot.create_chat_invite_link(
-            chat_id=chat_id,
-            name=f"one-use-{user_id}",
-            expire_date=expires_at,
-            member_limit=1
-        )
-        return link.invite_link
-    except Exception as e:
-        print(f"[WARN] Could not create invite link: {e}")
-        return None
-
-
-# Notify admins via DM
-async def notify_admins(bot: Bot, text: str):
-    """
-    Sends a DM notification to each admin listed in ADMIN_USER_IDS.
-    """
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            await bot.send_message(int(admin_id), text)
-        except Exception:
-            # Ignore DM errors (e.g., admin never started the bot)
-            pass
-
-
-# --- i18n: language detection + texts (EN/ES) ---
-def get_lang(user: types.User) -> str:
     """
     Returns 'es' if the user's Telegram app language is Spanish, otherwise 'en'.
     """
@@ -814,6 +771,9 @@ def payout_methods_kb(lang: str):
 
 
 # ================== Handlers ==================
+def get_lang(user: types.User) -> str:
+    code = (user.language_code or "en").lower()
+    return "es" if code.startswith("es") else "en"
 
 @dp.message(CommandStart())
 async def on_start(message: Message):
@@ -843,6 +803,7 @@ async def on_contact(message: Message):
         return
 
     phone_e164 = e164(c.phone_number)
+    country_iso = country_code_from_phone(phone_e164) or "ZZ"
     if not phone_e164:
         await message.answer(t("invalid_number", lang))
         return
@@ -1272,3 +1233,28 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+def country_code_from_phone(phone_e164: str) -> str | None:
+    """
+    Devuelve el código ISO-2 del país (ej. 'CR', 'MX', 'US') a partir de un teléfono en formato E.164.
+    """
+    try:
+        num = phonenumbers.parse(phone_e164, None)
+        return phonenumbers.region_code_for_number(num)
+    except Exception:
+        return None
+
+def get_lang(user) -> str:
+    """
+    Devuelve 'es' si el usuario de Telegram tiene language_code empezando en 'es',
+    si no, 'en'. Si existe DEFAULT_LANG en .env (es/en), tiene prioridad.
+    """
+    try:
+        env = (os.getenv("DEFAULT_LANG") or "").strip().lower()
+        if env in ("es", "en"):
+            return env
+        code = (getattr(user, "language_code", "") or "").lower()
+        if code.startswith("es"):
+            return "es"
+        return "en"
+    except Exception:
+        return "en"
