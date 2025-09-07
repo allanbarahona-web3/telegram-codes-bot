@@ -30,7 +30,7 @@ import aiosqlite
 import phonenumbers   # phone number normalization
 
 # ================== Config ==================
-load_dotenv()
+load_dotenv(".env.dev")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "codes.db")
 ADMIN_USER_IDS = [x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()]
@@ -154,6 +154,14 @@ TEXTS = {
     "start": {
         "en": "Hello 👋\nTo get your unique code, tap the button and share your phone number.",
         "es": "Hola 👋\nPara obtener tu código único, toca el botón y comparte tu número de teléfono."
+    },
+    "start_mobile_only": {
+        "en": "To continue, tap *📱 Share phone* from your mobile Telegram app.",
+        "es": "Para continuar, toca *📱 Compartir teléfono* desde tu app móvil de Telegram."
+    },
+    "share_own_number_mobile": {
+        "en": "You must share *your* number from the mobile Telegram app using the button.",
+        "es": "Debes compartir *tu* número desde la app móvil de Telegram usando el botón."
     },
     "optional_enter_code": {
         "en": "Optional: if someone invited you, enter their code below 👇",
@@ -817,7 +825,7 @@ async def on_start(message: Message):
         if GROUP_CHAT_ID:
             await message.answer(t("group_ready", lang), reply_markup=group_link_button(lang))
         return
-    await message.answer(t("start", lang), reply_markup=share_phone_kb(lang))
+    await message.answer(t("start_mobile_only", lang), reply_markup=share_phone_kb(lang))
 
 
 @dp.message(F.contact)
@@ -831,21 +839,21 @@ async def on_contact(message: Message):
                  c.phone_number)
 
     if not getattr(c, "user_id", None) or c.user_id != message.from_user.id:
-        await message.answer(t("share_own_number", lang))
+        await message.answer(t("share_own_number_mobile", lang))
         return
 
     phone_e164 = e164(c.phone_number)
     if not phone_e164:
         await message.answer(t("invalid_number", lang))
         return
-    region = country_code_from_phone(c.phone_number)
+    region = country_from_e164(phone_e164)
 
     code = await assign_or_get_code(message.from_user.id, phone_e164, prefix_override=region, country_code=region)
     if not code:
         await message.answer(t("error", lang, err="Could not generate your code. Try again."))
         return
 
-    await message.answer(t("phone_verified", lang, region=region, code=code), reply_markup=ReplyKeyboardRemove(lang))
+    await message.answer(t("phone_verified", lang, region=region, code=code), reply_markup=ReplyKeyboardRemove())
     await message.answer(t("remember_offer", lang), reply_markup=remember_kb(lang))
     await message.answer(t("enter_inviter_code", lang), reply_markup=referral_button(lang))
 
@@ -1159,6 +1167,9 @@ async def mark_paid_cmd(message: Message):
         await db.commit()
     await message.answer(t("marked_paid", lang, pid=pid))
 
+@dp.message(Command("id"))
+async def cmd_id(m: Message):
+    await m.answer(f"chat_id={m.chat.id}\ntype={m.chat.type}\ntitle={m.chat.title}")
 
 # ======= Notifications =======
 async def notify_withdraw(bot: Bot, user: types.User, pid: int, amount_cents: int, method_type: str, details: str, lang: str):
@@ -1181,6 +1192,75 @@ def format_money(cents: int) -> str:
     major = cents // 100
     minor = cents % 100
     return f"{sign}{CURRENCY} {major}.{minor:02d}"
+
+def country_from_e164(phone_e164: str) -> str:
+    try:
+        num = phonenumbers.parse(phone_e164, None)  # E.164: debe empezar con '+'
+        return phonenumbers.region_code_for_number(num) or "ZZ"
+    except phonenumbers.NumberParseException:
+        return "ZZ"
+
+# === HELP (/help y botón "❓ Ayuda") ===
+
+## Duplicate imports removed
+
+def _help_text(lang: str) -> str:
+    if str(lang).lower().startswith("es"):
+        return (
+            "*¿Cómo funciona?*\n"
+            "1) Comparte tu teléfono (móvil) para verificarlo.\n"
+            "2) Te damos tu *código único* y podrás invitar referidos.\n"
+            "3) Mira tus puntos/ganancias y solicita retiro cuando corresponda.\n\n"
+            "*Comandos útiles*\n"
+            "• /micodigo — Mostrar mi código\n"
+            "• /mispuntos — Ver mis puntos\n"
+            "• /misganancias — Ver mis ganancias/balance\n"
+            "• /cobrar — Solicitar retiro\n\n"
+            "*Privacidad*\n"
+            "Guardamos tu ID de Telegram, teléfono (E.164), país (por prefijo) y tu código. No compartimos datos con terceros."
+        )
+    else:
+        return (
+            "*How it works*\n"
+            "1) Share your phone (mobile) to verify it.\n"
+            "2) We issue your *unique code* so you can invite referrals.\n"
+            "3) Check your points/earnings and request withdrawals when eligible.\n\n"
+            "*Useful commands*\n"
+            "• /mycode — Show my code\n"
+            "• /mypoints — Show my points\n"
+            "• /balance — Show balance\n"
+            "• /withdraw — Request withdrawal\n\n"
+            "*Privacy*\n"
+            "We store your Telegram ID, phone (E.164), country (by prefix) and your code. We don't share data with third parties."
+        )
+
+def _help_kb(lang: str) -> InlineKeyboardMarkup:
+    btns = [[InlineKeyboardButton(text="⬅️ " + ("Volver al menú" if str(lang).lower().startswith("es") else "Back to menu"),
+                                  callback_data="back_to_menu")]]
+    return InlineKeyboardMarkup(inline_keyboard=btns)
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    lang = get_lang(message.from_user)
+    await message.answer(_help_text(lang), parse_mode="Markdown", reply_markup=_help_kb(lang))
+
+@dp.callback_query(F.data == "help")
+async def cb_help(q: CallbackQuery):
+    lang = get_lang(q.from_user)
+    await q.message.answer(_help_text(lang), parse_mode="Markdown", reply_markup=_help_kb(lang))
+    await q.answer()
+
+@dp.callback_query(F.data == "back_to_menu")
+async def cb_back_to_menu(q: CallbackQuery):
+    lang = get_lang(q.from_user)
+    # Reutiliza tus teclados existentes:
+    await q.message.answer(t("remember_offer", lang), reply_markup=remember_kb(lang))
+    await q.message.answer(t("enter_inviter_code", lang), reply_markup=referral_button(lang))
+    if GROUP_CHAT_ID:
+        await q.message.answer(t("group_ready", lang), reply_markup=group_link_button(lang))
+    await q.answer()
+
+    # === /HELP ===
 
 
 # ================== Main ==================

@@ -1,0 +1,1437 @@
+[33mtag v0.1.0[m
+Tagger: Allan Barahona <abarahona@barmentech.com>
+Date:   Fri Sep 5 19:09:14 2025 -0600
+
+Release 0.1 – Telegram Referrals Bot (QA Freeze)
+
+[33mcommit 271a4059632aa3108a7e38655ddca68d7c623b65[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m, [m[1;33mtag: v0.1.0[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Allan Barahona <abarahona@barmentech.com>
+Date:   Fri Sep 5 18:55:02 2025 -0600
+
+    refactor: replace hello.py with telegram_referrals_bot.py
+
+[1mdiff --git a/exports/users-20250904-034723.csv b/exports/users-20250904-034723.csv[m
+[1mnew file mode 100644[m
+[1mindex 0000000..30f6512[m
+[1m--- /dev/null[m
+[1m+++ b/exports/users-20250904-034723.csv[m
+[36m@@ -0,0 +1,2 @@[m
+[32m+[m[32muser_id,phone,code,assigned_at,country_code[m[41m
+[m
+[32m+[m[32m1972363644,50671508835,SET506715088352025,2025-09-02T23:11:03.054601,[m[41m
+[m
+[1mdiff --git a/hello.py b/hello.py[m
+[1mdeleted file mode 100644[m
+[1mindex 34e5d57..0000000[m
+[1m--- a/hello.py[m
+[1m+++ /dev/null[m
+[36m@@ -1,432 +0,0 @@[m
+[31m-# hello.py[m
+[31m-[m
+[31m-import os[m
+[31m-import re[m
+[31m-import asyncio[m
+[31m-import datetime[m
+[31m-import sqlite3[m
+[31m-import secrets[m
+[31m-from typing import Optional[m
+[31m-import csv[m
+[31m-import os[m
+[31m-from datetime import datetime[m
+[31m-[m
+[31m-from aiogram import Bot, Dispatcher, F, types[m
+[31m-from aiogram.filters import CommandStart, Command[m
+[31m-from aiogram.types import ([m
+[31m-    Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,[m
+[31m-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply[m
+[31m-)[m
+[31m-[m
+[31m-from dotenv import load_dotenv[m
+[31m-import aiosqlite[m
+[31m-import phonenumbers   # phone number normalization[m
+[31m-[m
+[31m-# ================== Config ==================[m
+[31m-load_dotenv()[m
+[31m-BOT_TOKEN = os.getenv("BOT_TOKEN")[m
+[31m-DB_PATH = "codes.db"[m
+[31m-ADMIN_USER_IDS = [x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()][m
+[31m-[m
+[31m-DEFAULT_REGION = os.getenv("DEFAULT_REGION", "CR")   # fallback region for parsing phone numbers[m
+[31m-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")           # group chat id (e.g., -1001234567890)[m
+[31m-INVITE_TTL_HOURS = int(os.getenv("INVITE_TTL_HOURS", "12"))  # invite link validity in hours[m
+[31m-[m
+[31m-if not BOT_TOKEN:[m
+[31m-    raise RuntimeError("BOT_TOKEN not configured (.env)")[m
+[31m-[m
+[31m-dp = Dispatcher()[m
+[31m-ACTIVE_CAMPAIGN_ID = 1[m
+[31m-[m
+[31m-# ================== Utilities ==================[m
+[31m-ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # excluding 0/O/1/I for readability[m
+[31m-[m
+[31m-def build_random_code(prefix: str = "RF", length: int = 8) -> str:[m
+[31m-    """Readable random referral code without PII. Format: RF-XXXX-XXXX"""[m
+[31m-    body = "".join(secrets.choice(ALPHABET) for _ in range(length))[m
+[31m-    return f"{prefix}-{body[:4]}-{body[4:]}"[m
+[31m-[m
+[31m-def utcnow_iso() -> str:[m
+[31m-    return datetime.datetime.now(datetime.timezone.utc).isoformat()[m
+[31m-[m
+[31m-# Normalize phone number to E.164 and extract country[m
+[31m-def e164(phone_raw: str, default_region: str = DEFAULT_REGION) -> Optional[str]:[m
+[31m-    try:[m
+[31m-        parsed = phonenumbers.parse(phone_raw, None if phone_raw.strip().startswith("+") else default_region)[m
+[31m-        if not phonenumbers.is_valid_number(parsed):[m
+[31m-            return None[m
+[31m-        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)[m
+[31m-    except Exception:[m
+[31m-        return None[m
+[31m-[m
+[31m-def country_code_from_phone(phone_raw: str, default_region: str = DEFAULT_REGION) -> str:[m
+[31m-    try:[m
+[31m-        parsed = phonenumbers.parse(phone_raw, None if phone_raw.strip().startswith("+") else default_region)[m
+[31m-        region = phonenumbers.region_code_for_number(parsed)[m
+[31m-        return region or "UNKN"[m
+[31m-    except Exception:[m
+[31m-        return "UNKN"[m
+[31m-[m
+[31m-# Helper to create one-time invite links with expiration[m
+[31m-async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = INVITE_TTL_HOURS) -> Optional[str]:[m
+[31m-    """[m
+[31m-    Requires the bot to be admin of the group with invite link creation permissions.[m
+[31m-    """[m
+[31m-    try:[m
+[31m-        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())[m
+[31m-        link = await bot.create_chat_invite_link([m
+[31m-            chat_id=chat_id,[m
+[31m-            name=f"one-use-{user_id}",[m
+[31m-            expire_date=expires_at,[m
+[31m-            member_limit=1[m
+[31m-        )[m
+[31m-        return link.invite_link[m
+[31m-    except Exception as e:[m
+[31m-        print(f"[WARN] Could not create invite link: {e}")[m
+[31m-        return None[m
+[31m-[m
+[31m-# ================== DB: Schema ==================[m
+[31m-CREATE_USERS = """[m
+[31m-CREATE TABLE IF NOT EXISTS users ([m
+[31m-    user_id      INTEGER PRIMARY KEY,[m
+[31m-    phone        TEXT UNIQUE,[m
+[31m-    code         TEXT UNIQUE,[m
+[31m-    assigned_at  TEXT,[m
+[31m-    country_code TEXT[m
+[31m-);[m
+[31m-"""[m
+[31m-[m
+[31m-ALTER_USERS_ADD_COUNTRY = "ALTER TABLE users ADD COLUMN country_code TEXT;"[m
+[31m-[m
+[31m-CREATE_IDX_USERS_CODE_UNIQUE = "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_code_unique ON users(code);"[m
+[31m-CREATE_IDX_USERS_PHONE = "CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);"[m
+[31m-CREATE_IDX_USERS_ASSIGNED_AT = "CREATE INDEX IF NOT EXISTS idx_users_assigned_at ON users(assigned_at);"[m
+[31m-CREATE_IDX_USERS_COUNTRY = "CREATE INDEX IF NOT EXISTS idx_users_country ON users(country_code);"[m
+[31m-[m
+[31m-CREATE_CAMPAIGNS = """[m
+[31m-CREATE TABLE IF NOT EXISTS campaigns ([m
+[31m-  id            INTEGER PRIMARY KEY,[m
+[31m-  name          TEXT NOT NULL,[m
+[31m-  starts_at     TEXT,[m
+[31m-  ends_at       TEXT,[m
+[31m-  reward_type   TEXT,[m
+[31m-  reward_value  INTEGER,[m
+[31m-  is_active     INTEGER[m
+[31m-);[m
+[31m-"""[m
+[31m-[m
+[31m-CREATE_REFERRALS = """[m
+[31m-CREATE TABLE IF NOT EXISTS referrals ([m
+[31m-  id                INTEGER PRIMARY KEY,[m
+[31m-  campaign_id       INTEGER NOT NULL,[m
+[31m-  referrer_user_id  INTEGER NOT NULL,[m
+[31m-  referee_user_id   INTEGER NOT NULL,[m
+[31m-  code_used         TEXT NOT NULL,[m
+[31m-  created_at        TEXT NOT NULL,[m
+[31m-  status            TEXT NOT NULL,[m
+[31m-  UNIQUE(campaign_id, referee_user_id),[m
+[31m-  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)[m
+[31m-);[m
+[31m-"""[m
+[31m-[m
+[31m-SEED_DEFAULT_CAMPAIGN = """[m
+[31m-INSERT INTO campaigns (id, name, starts_at, ends_at, reward_type, reward_value, is_active)[m
+[31m-VALUES (1, 'Default Referral Campaign', NULL, NULL, 'points', 1, 1)[m
+[31m-ON CONFLICT(id) DO NOTHING;[m
+[31m-"""[m
+[31m-[m
+[31m-# ================== DB: Initialization ==================[m
+[31m-async def init_db():[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        await db.execute("PRAGMA journal_mode=WAL;")[m
+[31m-        await db.execute("PRAGMA synchronous=NORMAL;")[m
+[31m-[m
+[31m-        await db.execute(CREATE_USERS)[m
+[31m-[m
+[31m-        try:[m
+[31m-            await db.execute(ALTER_USERS_ADD_COUNTRY)[m
+[31m-        except Exception:[m
+[31m-            pass[m
+[31m-[m
+[31m-        await db.execute(CREATE_CAMPAIGNS)[m
+[31m-        await db.execute(CREATE_REFERRALS)[m
+[31m-[m
+[31m-        await db.execute(CREATE_IDX_USERS_CODE_UNIQUE)[m
+[31m-        await db.execute(CREATE_IDX_USERS_PHONE)[m
+[31m-        await db.execute(CREATE_IDX_USERS_ASSIGNED_AT)[m
+[31m-        await db.execute(CREATE_IDX_USERS_COUNTRY)[m
+[31m-[m
+[31m-        await db.execute(SEED_DEFAULT_CAMPAIGN)[m
+[31m-        await db.commit()[m
+[31m-[m
+[31m-# ================== DB: Helpers ==================[m
+[31m-async def get_existing_code_by_user(user_id: int):[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        cur = await db.execute("SELECT code FROM users WHERE user_id = ?", (user_id,))[m
+[31m-        row = await cur.fetchone()[m
+[31m-        return row[0] if row else None[m
+[31m-[m
+[31m-async def get_code_by_phone(phone: str):[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        cur = await db.execute("SELECT user_id, code FROM users WHERE phone = ?", (phone,))[m
+[31m-        row = await cur.fetchone()[m
+[31m-        return row if row else None[m
+[31m-[m
+[31m-async def find_user_by_code(code: str):[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        cur = await db.execute("SELECT user_id FROM users WHERE code = ?", (code,))[m
+[31m-        row = await cur.fetchone()[m
+[31m-        return row[0] if row else None[m
+[31m-[m
+[31m-async def referee_already_referred(campaign_id: int, referee_user_id: int) -> bool:[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        cur = await db.execute([m
+[31m-            "SELECT 1 FROM referrals WHERE campaign_id=? AND referee_user_id=? LIMIT 1",[m
+[31m-            (campaign_id, referee_user_id)[m
+[31m-        )[m
+[31m-        return bool(await cur.fetchone())[m
+[31m-[m
+[31m-async def insert_referral(campaign_id: int, referrer_user_id: int, referee_user_id: int, code_used: str):[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        await db.execute([m
+[31m-            """[m
+[31m-            INSERT INTO referrals (campaign_id, referrer_user_id, referee_user_id, code_used, created_at, status)[m
+[31m-            VALUES (?, ?, ?, ?, ?, 'APPROVED')[m
+[31m-            """,[m
+[31m-            (campaign_id, referrer_user_id, referee_user_id, code_used, utcnow_iso())[m
+[31m-        )[m
+[31m-        await db.commit()[m
+[31m-[m
+[31m-# ================== Code Assignment ==================[m
+[31m-async def assign_or_get_code(user_id: int, phone_e164: str, prefix_override: str, country_code: str) -> Optional[str]:[m
+[31m-    existing = await get_existing_code_by_user(user_id)[m
+[31m-    if existing:[m
+[31m-        return existing[m
+[31m-[m
+[31m-    phone_owner = await get_code_by_phone(phone_e164)[m
+[31m-    if phone_owner:[m
+[31m-        _, code = phone_owner[m
+[31m-        return code[m
+[31m-    async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-        await db.execute("PRAGMA journal_mode=WAL;")[m
+[31m-        await db.execute("PRAGMA synchronous=NORMAL;")[m
+[31m-[m
+[31m-        for _ in range(5):[m
+[31m-            code = build_random_code(prefix=prefix_override or "RF", length=8)[m
+[31m-            try:[m
+[31m-                await db.execute([m
+[31m-                    """[m
+[31m-                    INSERT INTO users (user_id, phone, code, assigned_at, country_code)[m
+[31m-                    VALUES (?, ?, ?, ?, ?)[m
+[31m-                    ON CONFLICT(user_id) DO UPDATE SET [m
+[31m-                        phone=excluded.phone,[m
+[31m-                        code=excluded.code,[m
+[31m-                        assigned_at=excluded.assigned_at,[m
+[31m-                        country_code=excluded.country_code[m
+[31m-                    """,[m
+[31m-                    (user_id, phone_e164, code, utcnow_iso(), country_code)[m
+[31m-                )[m
+[31m-                await db.commit()[m
+[31m-                return code[m
+[31m-            except sqlite3.IntegrityError as e:[m
+[31m-                msg = str(e).lower()[m
+[31m-                if "unique" in msg and "users(code)" in msg:[m
+[31m-                    continue[m
+[31m-                if "unique" in msg and "users.phone" in msg:[m
+[31m-                    row = await get_code_by_phone(phone_e164)[m
+[31m-                    if row:[m
+[31m-                        _, existing_code = row[m
+[31m-                        return existing_code[m
+[31m-                raise[m
+[31m-    return None[m
+[31m-[m
+[31m-# ================== UI ==================[m
+[31m-def share_phone_kb():[m
+[31m-    return ReplyKeyboardMarkup([m
+[31m-        keyboard=[[KeyboardButton(text="📱 Share my phone number", request_contact=True)]],[m
+[31m-        resize_keyboard=True,[m
+[31m-        one_time_keyboard=True[m
+[31m-    )[m
+[31m-[m
+[31m-def remember_kb():[m
+[31m-    return InlineKeyboardMarkup([m
+[31m-        inline_keyboard=[[InlineKeyboardButton(text="🔑 Remember my code", callback_data="remember_code")]][m
+[31m-    )[m
+[31m-[m
+[31m-def referral_button():[m
+[31m-    return InlineKeyboardMarkup([m
+[31m-        inline_keyboard=[[InlineKeyboardButton(text="🎁 Enter referral code", callback_data="enter_referral")]][m
+[31m-    )[m
+[31m-[m
+[31m-def group_link_button():[m
+[31m-    return InlineKeyboardMarkup([m
+[31m-        inline_keyboard=[[InlineKeyboardButton(text="🟢 Get group link", callback_data="get_group_link")]][m
+[31m-    )[m
+[31m-[m
+[31m-# ================== Handlers ==================[m
+[31m-@dp.message(CommandStart())[m
+[31m-async def on_start(message: Message):[m
+[31m-    existing = await get_existing_code_by_user(message.from_user.id)[m
+[31m-    if existing:[m
+[31m-        await message.answer([m
+[31m-            "You already have a code assigned. Tap the button to see it or enter a referral code:",[m
+[31m-            reply_markup=remember_kb()[m
+[31m-        )[m
+[31m-        await message.answer("Optional: if someone invited you, enter their code below 👇", reply_markup=referral_button())[m
+[31m-        if GROUP_CHAT_ID:[m
+[31m-            await message.answer("Ready to join the group?", reply_markup=group_link_button())[m
+[31m-        return[m
+[31m-[m
+[31m-    await message.answer([m
+[31m-        "Hello 👋\nTo get your unique code, tap the button and share your phone number.",[m
+[31m-        reply_markup=share_phone_kb()[m
+[31m-    )[m
+[31m-[m
+[31m-@dp.message(F.contact)[m
+[31m-async def on_contact(message: Message):[m
+[31m-    c = message.contact[m
+[31m-    if c.user_id != message.from_user.id:[m
+[31m-        await message.answer("⚠️ Please share your **own** phone number.")[m
+[31m-        return[m
+[31m-[m
+[31m-    phone_e164 = e164(c.phone_number)[m
+[31m-    if not phone_e164:[m
+[31m-        await message.answer("⚠️ Invalid number. Tap the button again and share your phone.")[m
+[31m-        return[m
+[31m-    region = country_code_from_phone(c.phone_number)[m
+[31m-[m
+[31m-    code = await assign_or_get_code(message.from_user.id, phone_e164, prefix_override=region, country_code=region)[m
+[31m-    if not code:[m
+[31m-        await message.answer("😕 Could not generate your code. Please try again.")[m
+[31m-        return[m
+[31m-    await message.answer([m
+[31m-        f"✅ Phone verified.\n🌎 Country detected: {region}\n🔑 Your unique code: {code}",[m
+[31m-        reply_markup=ReplyKeyboardRemove()[m
+[31m-    )[m
+[31m-    await message.answer("Do you want to remember it quickly later?", reply_markup=remember_kb())[m
+[31m-    await message.answer("If you were invited, enter your inviter's code:", reply_markup=referral_button())[m
+[31m-[m
+[31m-    if GROUP_CHAT_ID:[m
+[31m-        bot = message.bot[m
+[31m-        invite = await create_one_time_invite(bot, GROUP_CHAT_ID, message.from_user.id, INVITE_TTL_HOURS)[m
+[31m-        if invite:[m
+[31m-            await message.answer([m
+[31m-                f"🟢 Group access (expires in {INVITE_TTL_HOURS}h, 1 use):\n{invite}"[m
+[31m-            )[m
+[31m-        else:[m
+[31m-            await message.answer([m
+[31m-                "ℹ️ Could not create an invite link. Check that the bot is **admin** of the group and `GROUP_CHAT_ID` is correct."[m
+[31m-            )[m
+[31m-[m
+[31m-@dp.message(Command("mycode"))[m
+[31m-@dp.message(Command("micodigo"))[m
+[31m-async def cmd_micodigo(message: Message):[m
+[31m-    code = await get_existing_code_by_user(message.from_user.id)[m
+[31m-    if code:[m
+[31m-        await message.answer(f"🔑 Your code is: {code}")[m
+[31m-    else:[m
+[31m-        await message.answer("You don't have a code yet. Use /start and share your phone.")[m
+[31m-[m
+[31m-@dp.callback_query(F.data == "remember_code")[m
+[31m-async def cb_remember(callback: CallbackQuery):[m
+[31m-    code = await get_existing_code_by_user(callback.from_user.id)[m
+[31m-    if code:[m
+[31m-        await callback.message.answer(f"🔑 Your code is: {code}")[m
+[31m-    else:[m
+[31m-        await callback.message.answer("You don't have a code yet. Use /start and share your phone.")[m
+[31m-    await callback.answer()[m
+[31m-[m
+[31m-# ======= Referrals Flow (ForceReply) =======[m
+[31m-@dp.callback_query(F.data == "enter_referral")[m
+[31m-async def cb_enter_referral(q: CallbackQuery):[m
+[31m-    await q.message.answer([m
+[31m-        "Enter the *code of the person who invited you* (e.g. `CR-AB12-CD34`):",[m
+[31m-        reply_markup=ForceReply(selective=True),[m
+[31m-        parse_mode="Markdown"[m
+[31m-    )[m
+[31m-    await q.answer()[m
+[31m-[m
+[31m-@dp.message(F.reply_to_message, F.text)[m
+[31m-async def on_referral_code_input(message: Message):[m
+[31m-    if not message.reply_to_message or not message.reply_to_message.text:[m
+[31m-        return[m
+[31m-    if "code of the person" not in message.reply_to_message.text.lower():[m
+[31m-        return[m
+[31m-[m
+[31m-    referee_id = message.from_user.id[m
+[31m-    raw = message.text.strip().upper()[m
+[31m-    code = raw.replace(" ", "").replace("_", "").replace("—", "-")[m
+[31m-[m
+[31m-    referrer_id = await find_user_by_code(code)[m
+[31m-    if not referrer_id:[m
+[31m-        await message.answer("❌ Invalid code. Check and try again.")[m
+[31m-        return[m
+[31m-[m
+[31m-    if referrer_id == referee_id:[m
+[31m-        await message.answer("❌ You cannot use your own code.")[m
+[31m-        return[m
+[31m-[m
+[31m-    if await referee_already_referred(ACTIVE_CAMPAIGN_ID, referee_id):[m
+[31m-        await message.answer("ℹ️ You already registered a referral code in this campaign.")[m
+[31m-        return[m
+[31m-[m
+[31m-    try:[m
+[31m-        await insert_referral(ACTIVE_CAMPAIGN_ID, referrer_id, referee_id, code)[m
+[31m-    except sqlite3.IntegrityError:[m
+[31m-        await message.answer("ℹ️ You already registered a referral code in this campaign.")[m
+[31m-        return[m
+[31m-[m
+[31m-    await message.answer("🎉 Done! Your referral has been registered. Thanks for participating.")[m
+[31m-[m
+[31m-# ======= Get group link on demand =======[m
+[31m-@dp.callback_query(F.data == "get_group_link")[m
+[31m-async def cb_get_group_link(q: CallbackQuery):[m
+[31m-    if not GROUP_CHAT_ID:[m
+[31m-        await q.message.answer("ℹ️ Missing GROUP_CHAT_ID in .env")[m
+[31m-        await q.answer()[m
+[31m-        return[m
+[31m-    invite = await create_one_time_invite(q.bot, GROUP_CHAT_ID, q.from_user.id, INVITE_TTL_HOURS)[m
+[31m-    if invite:[m
+[31m-        await q.message.answer(f"🟢 Group link (expires in {INVITE_TTL_HOURS}h, 1 use):\n{invite}")[m
+[31m-    else:[m
+[31m-        await q.message.answer("ℹ️ Could not create invite link. Make sure the bot is an admin.")[m
+[31m-        await q.answer()[m
+[31m-[m
+[31m-# ============================[m
+[31m-# Export CSV  (/exportcsv)[m
+[31m-# ============================[m
+[31m-@dp.message(Command("exportcsv"))[m
+[31m-@dp.message(F.text.startswith("/exportcsv"))[m
+[31m-async def export_csv(message: Message):[m
+[31m-    try:[m
+[31m-        await message.answer("⏳ Working…")[m
+[31m-[m
+[31m-        if str(message.from_user.id) not in ADMIN_USER_IDS:[m
+[31m-            return await message.answer("❌ Unauthorized")[m
+[31m-[m
+[31m-        os.makedirs("exports", exist_ok=True)[m
+[31m-        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")[m
+[31m-[m
+[31m-        users_file = f"exports/users-{ts}.csv"[m
+[31m-        async with aiosqlite.connect(DB_PATH) as db:[m
+[31m-            async with db.execute("SELECT user_id, phone, code, assigned_at, country_code FROM users") as cur:[m
+[31m-                rows = await cur.fetchall()[m
+[31m-        with open(users_file, "w", newline="", encoding="utf-8") as f:[m
+[31m-            w = csv.writer(f)[m
+[31m-            w.writerow(["user_id", "phone", "code", "assigned_at", "country_code"])[m
+[31m-            w.writerows(rows)[m
+[31m-[m
+[31m-        base = os.path.basename(users_file)[m
+[31m-        return await message.answer(f"📤 CSV exported:\n- `{base}`", parse_mode="Markdown")[m
+[31m-[m
+[31m-    except Exception as e:[m
+[31m-        return await message.answer(f"⚠️ Error: {e}")[m
+[31m-[m
+[31m-# ================== Main ==================[m
+[31m-async def main():[m
+[31m-    await init_db()[m
+[31m-    bot = Bot(BOT_TOKEN)[m
+[31m-    await dp.start_polling(bot)[m
+[31m-[m
+[31m-if __name__ == "__main__":[m
+[31m-    asyncio.run(main())[m
+[1mdiff --git a/telegram_referrals_bot.py b/telegram_referrals_bot.py[m
+[1mnew file mode 100644[m
+[1mindex 0000000..ee77010[m
+[1m--- /dev/null[m
+[1m+++ b/telegram_referrals_bot.py[m
+[36m@@ -0,0 +1,1194 @@[m
+[32m+[m[32m#[m
+[32m+[m[32m#[m
+[32m+[m[32m# Requirements (same as before): aiogram v3, aiosqlite, phonenumbers, python-dotenv[m
+[32m+[m
+[32m+[m[32mimport os[m
+[32m+[m[32mimport re[m
+[32m+[m[32mimport json[m
+[32m+[m[32mimport asyncio[m
+[32m+[m[32mimport datetime[m
+[32m+[m[32mimport sqlite3[m
+[32m+[m[32mimport secrets[m
+[32m+[m[32mfrom typing import Optional, Tuple, List[m
+[32m+[m[32mimport csv[m
+[32m+[m[32mfrom datetime import datetime as dt[m
+[32m+[m[32mfrom aiogram import Bot, Dispatcher, F, types[m
+[32m+[m[32mimport logging[m
+[32m+[m
+[32m+[m[32mlogging.basicConfig([m
+[32m+[m[32m    level=logging.INFO,[m
+[32m+[m[32m    format="%(asctime)s %(levelname)s %(message)s"[m
+[32m+[m[32m)[m
+[32m+[m[32mfrom aiogram.filters import CommandStart, Command[m
+[32m+[m[32mfrom aiogram.types import ([m
+[32m+[m[32m    Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,[m
+[32m+[m[32m    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m[32mfrom dotenv import load_dotenv[m
+[32m+[m[32mimport aiosqlite[m
+[32m+[m[32mimport phonenumbers   # phone number normalization[m
+[32m+[m
+[32m+[m[32m# ================== Config ==================[m
+[32m+[m[32mload_dotenv()[m
+[32m+[m[32mBOT_TOKEN = os.getenv("BOT_TOKEN")[m
+[32m+[m[32mDB_PATH = os.getenv("DB_PATH", "codes.db")[m
+[32m+[m[32mADMIN_USER_IDS = [x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()][m
+[32m+[m
+[32m+[m[32mDEFAULT_REGION = os.getenv("DEFAULT_REGION", "CR")   # fallback region for parsing phone numbers[m
+[32m+[m[32mGROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")           # group chat id (e.g., -1001234567890)[m
+[32m+[m[32mINVITE_TTL_HOURS = int(os.getenv("INVITE_TTL_HOURS", "12"))  # invite link validity in hours[m
+[32m+[m
+[32m+[m[32m# Earnings config[m
+[32m+[m[32mCOMMISSION_PER_APPROVED_CENTS = int(os.getenv("COMMISSION_PER_APPROVED_CENTS", "100"))[m
+[32m+[m[32mCURRENCY = os.getenv("CURRENCY", "USD")[m
+[32m+[m
+[32m+[m[32mif not BOT_TOKEN:[m
+[32m+[m[32m    raise RuntimeError("BOT_TOKEN not configured (.env)")[m
+[32m+[m
+[32m+[m[32m# Aiogram dispatcher[m
+[32m+[m[32mdp = Dispatcher()[m
+[32m+[m[32mACTIVE_CAMPAIGN_ID = 1[m
+[32m+[m
+[32m+[m[32m# ================== Utilities ==================[m
+[32m+[m[32mALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # excluding 0/O/1/I for readability[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef build_random_code(prefix: str = "RF", length: int = 8) -> str:[m
+[32m+[m[32m    """Readable random referral code without PII. Format: RF-XXXX-XXXX"""[m
+[32m+[m[32m    body = "".join(secrets.choice(ALPHABET) for _ in range(length))[m
+[32m+[m[32m    return f"{prefix}-{body[:4]}-{body[4:]}"[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef utcnow_iso() -> str:[m
+[32m+[m[32m    return datetime.datetime.now(datetime.timezone.utc).isoformat()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Normalize phone number to E.164 and extract country[m
+[32m+[m
+[32m+[m[32mdef e164(phone_raw: str, default_region: str = DEFAULT_REGION) -> Optional[str]:[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        raw = (phone_raw or "").strip()[m
+[32m+[m[32m        # Si empieza con +, no usamos región; si no, usamos DEFAULT_REGION (CR/ZZ)[m
+[32m+[m[32m        parsed = phonenumbers.parse(raw, None if raw.startswith("+") else default_region)[m
+[32m+[m
+[32m+[m[32m        # 1) Validación estricta[m
+[32m+[m[32m        if phonenumbers.is_valid_number(parsed):[m
+[32m+[m[32m            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)[m
+[32m+[m
+[32m+[m[32m        # 2) Fallback: números "posibles" (a veces metadatos de carrier faltan)[m
+[32m+[m[32m        if phonenumbers.is_possible_number(parsed):[m
+[32m+[m[32m            return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)[m
+[32m+[m
+[32m+[m[32m        # 3) Último recurso: conservar + y dígitos (longitud razonable)[m
+[32m+[m[32m        digits_only = re.sub(r"[^0-9]", "", raw)[m
+[32m+[m[32m        candidate = "+" + digits_only if not raw.startswith("+") else "+" + digits_only[m
+[32m+[m[32m        if 8 <= len(digits_only) <= 15:[m
+[32m+[m[32m            return candidate[m
+[32m+[m[32m        return None[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        # Último recurso si parsea mal: sanitizar agresivo[m
+[32m+[m[32m        digits_only = re.sub(r"[^0-9]", "", phone_raw or "")[m
+[32m+[m[32m        candidate = "+" + digits_only if digits_only else None[m
+[32m+[m[32m        if candidate and 8 <= len(digits_only) <= 15:[m
+[32m+[m[32m            return candidate[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef country_code_from_phone(phone_raw: str, default_region: str = DEFAULT_REGION) -> str:[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        parsed = phonenumbers.parse(phone_raw, None if phone_raw.strip().startswith("+") else default_region)[m
+[32m+[m[32m        region = phonenumbers.region_code_for_number(parsed)[m
+[32m+[m[32m        return region or "UNKN"[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        return "UNKN"[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Helper to create one-time invite links with expiration[m
+[32m+[m[32masync def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = INVITE_TTL_HOURS) -> Optional[str]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Requires the bot to be admin of the group with invite link creation permissions.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())[m
+[32m+[m[32m        link = await bot.create_chat_invite_link([m
+[32m+[m[32m            chat_id=chat_id,[m
+[32m+[m[32m            name=f"one-use-{user_id}",[m
+[32m+[m[32m            expire_date=expires_at,[m
+[32m+[m[32m            member_limit=1[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return link.invite_link[m
+[32m+[m[32m    except Exception as e:[m
+[32m+[m[32m        print(f"[WARN] Could not create invite link: {e}")[m
+[32m+[m[32m        return None[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Notify admins via DM[m
+[32m+[m[32masync def notify_admins(bot: Bot, text: str):[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Sends a DM notification to each admin listed in ADMIN_USER_IDS.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    for admin_id in ADMIN_USER_IDS:[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await bot.send_message(int(admin_id), text)[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            # Ignore DM errors (e.g., admin never started the bot)[m
+[32m+[m[32m            pass[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# --- i18n: language detection + texts (EN/ES) ---[m
+[32m+[m[32mdef get_lang(user: types.User) -> str:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Returns 'es' if the user's Telegram app language is Spanish, otherwise 'en'.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    code = (user.language_code or "en").lower()[m
+[32m+[m[32m    return "es" if code.startswith("es") else "en"[m
+[32m+[m
+[32m+[m
+[32m+[m[32mTEXTS = {[m
+[32m+[m[32m    "already_has_code": {[m
+[32m+[m[32m        "en": "You already have a code assigned. Tap the button to see it or enter a referral code:",[m
+[32m+[m[32m        "es": "Ya tienes un código asignado. Toca el botón para verlo o ingresa un código de referido:"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "start": {[m
+[32m+[m[32m        "en": "Hello 👋\nTo get your unique code, tap the button and share your phone number.",[m
+[32m+[m[32m        "es": "Hola 👋\nPara obtener tu código único, toca el botón y comparte tu número de teléfono."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "optional_enter_code": {[m
+[32m+[m[32m        "en": "Optional: if someone invited you, enter their code below 👇",[m
+[32m+[m[32m        "es": "Opcional: si alguien te invitó, ingresa su código aquí 👇"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_ready": {[m
+[32m+[m[32m        "en": "Ready to join the group?",[m
+[32m+[m[32m        "es": "¿Listo para entrar al grupo?"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "share_own_number": {[m
+[32m+[m[32m        "en": "⚠️ Please tap **Share my phone number**. Do not send an address-book contact.",[m
+[32m+[m[32m        "es": "⚠️ Toca **Compartir mi número de teléfono**. No envíes un contacto de tu agenda."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "invalid_number": {[m
+[32m+[m[32m        "en": "⚠️ Invalid number. Tap the button again and share your phone.",[m
+[32m+[m[32m        "es": "⚠️ Número inválido. Toca el botón de nuevo y comparte tu teléfono."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "phone_verified": {[m
+[32m+[m[32m        "en": "✅ Phone verified.\n🌎 Country detected: {region}\n🔑 Your unique code: {code}",[m
+[32m+[m[32m        "es": "✅ Teléfono verificado.\n🌎 País detectado: {region}\n🔑 Tu código único: {code}"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "remember_offer": {[m
+[32m+[m[32m        "en": "Do you want to remember it quickly later?",[m
+[32m+[m[32m        "es": "¿Quieres recordarlo rápidamente más tarde?"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "enter_inviter_code": {[m
+[32m+[m[32m        "en": "If you were invited, enter your inviter's code:",[m
+[32m+[m[32m        "es": "Si te invitaron, ingresa el código de quien te refirió:"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_access": {[m
+[32m+[m[32m        "en": "🟢 Group access (expires in {hours}h, 1 use):\n{link}",[m
+[32m+[m[32m        "es": "🟢 Acceso al grupo (vence en {hours}h, 1 uso):\n{link}"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_invite_fail": {[m
+[32m+[m[32m        "en": "ℹ️ Could not create an invite link. Check that the bot is **admin** of the group and `GROUP_CHAT_ID` is correct.",[m
+[32m+[m[32m        "es": "ℹ️ No pude crear un enlace de invitación. Verifica que el bot sea **admin** del grupo y que `GROUP_CHAT_ID` sea correcto."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "mycode_has": {[m
+[32m+[m[32m        "en": "🔑 Your code is: {code}",[m
+[32m+[m[32m        "es": "🔑 Tu código es: {code}"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "remember_button": {[m
+[32m+[m[32m        "en": "🔑 Remember my code",[m
+[32m+[m[32m        "es": "🔑 Recordar mi código"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "referral_button": {[m
+[32m+[m[32m        "en": "🎁 Enter referral code",[m
+[32m+[m[32m        "es": "🎁 Ingresar código de referido"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_link_button": {[m
+[32m+[m[32m        "en": "🟢 Get group link",[m
+[32m+[m[32m        "es": "🟢 Obtener enlace del grupo"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "share_phone_button": {[m
+[32m+[m[32m        "en": "📱 Share my phone number",[m
+[32m+[m[32m        "es": "📱 Compartir mi número"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "mycode_missing": {[m
+[32m+[m[32m        "en": "You don't have a code yet. Use /start and share your phone.",[m
+[32m+[m[32m        "es": "Aún no tienes código. Usa /start y comparte tu teléfono."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "referral_prompt": {[m
+[32m+[m[32m        "en": "Enter the *code of the person who invited you* (e.g. `CR-AB12-CD34`):",[m
+[32m+[m[32m        "es": "Escribe el *código de quien te invitó* (ej. `CR-AB12-CD34`):"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "invalid_referral": {[m
+[32m+[m[32m        "en": "❌ Invalid code. Check and try again.",[m
+[32m+[m[32m        "es": "❌ Código inválido. Verifica y vuelve a intentarlo."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "self_referral": {[m
+[32m+[m[32m        "en": "❌ You cannot use your own code.",[m
+[32m+[m[32m        "es": "❌ No puedes usar tu propio código."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "already_referred": {[m
+[32m+[m[32m        "en": "ℹ️ You already registered a referral code in this campaign.",[m
+[32m+[m[32m        "es": "ℹ️ Ya registraste un código de referido en esta campaña."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "reciprocal_blocked": {[m
+[32m+[m[32m        "en": "❌ Reciprocal referrals are not allowed in this campaign.",[m
+[32m+[m[32m        "es": "❌ Los referidos recíprocos no están permitidos en esta campaña."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "referral_done": {[m
+[32m+[m[32m        "en": "🎉 Done! Your referral has been registered. Thanks for participating.",[m
+[32m+[m[32m        "es": "🎉 ¡Listo! Tu referido fue registrado. Gracias por participar."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_missing_env": {[m
+[32m+[m[32m        "en": "ℹ️ Missing GROUP_CHAT_ID in .env",[m
+[32m+[m[32m        "es": "ℹ️ Falta configurar GROUP_CHAT_ID en el .env"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "banned_message": {[m
+[32m+[m[32m        "en": "🚫 You are banned from this group. Please contact an administrator.",[m
+[32m+[m[32m        "es": "🚫 Estás baneado del grupo. Por favor contacta a un administrador."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_link": {[m
+[32m+[m[32m        "en": "🟢 Group link (expires in {hours}h, 1 use):\n{link}",[m
+[32m+[m[32m        "es": "🟢 Enlace al grupo (vence en {hours}h, 1 uso):\n{link}"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "group_invite_fail_short": {[m
+[32m+[m[32m        "en": "ℹ️ Could not create invite link. Make sure the bot is an admin.",[m
+[32m+[m[32m        "es": "ℹ️ No pude crear un enlace. Asegúrate de que el bot sea admin."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "working": {[m
+[32m+[m[32m        "en": "⏳ Working…",[m
+[32m+[m[32m        "es": "⏳ Trabajando…"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "unauthorized": {[m
+[32m+[m[32m        "en": "❌ Unauthorized",[m
+[32m+[m[32m        "es": "❌ No autorizado"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "csv_exported": {[m
+[32m+[m[32m        "en": "📤 CSV exported:\n- `{file}`",[m
+[32m+[m[32m        "es": "📤 CSV exportado:\n- `{file}`"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "error": {[m
+[32m+[m[32m        "en": "⚠️ Error: {err}",[m
+[32m+[m[32m        "es": "⚠️ Error: {err}"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    # NEW i18n keys[m
+[32m+[m[32m    "your_points": {"en": "Your points", "es": "Tus puntos"},[m
+[32m+[m[32m    "balance_header": {[m
+[32m+[m[32m        "en": "💼 Your balance",[m
+[32m+[m[32m        "es": "💼 Tu balance"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "balance_body": {[m
+[32m+[m[32m        "en": ([m
+[32m+[m[32m            "Approved referrals: {approved}\n"[m
+[32m+[m[32m            "Commission per referral: {commission}\n"[m
+[32m+[m[32m            "Gross earned: {gross}\n"[m
+[32m+[m[32m            "Paid out: {paid}\n"[m
+[32m+[m[32m            "Pending withdrawals: {pending}\n"[m
+[32m+[m[32m            "\nAvailable now: {available}"[m
+[32m+[m[32m        ),[m
+[32m+[m[32m        "es": ([m
+[32m+[m[32m            "Referidos aprobados: {approved}\n"[m
+[32m+[m[32m            "Comisión por referido: {commission}\n"[m
+[32m+[m[32m            "Bruto ganado: {gross}\n"[m
+[32m+[m[32m            "Pagado: {paid}\n"[m
+[32m+[m[32m            "Retiros pendientes: {pending}\n"[m
+[32m+[m[32m            "\nDisponible ahora: {available}"[m
+[32m+[m[32m        ),[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "no_balance": {[m
+[32m+[m[32m        "en": "You have no earnings yet.",[m
+[32m+[m[32m        "es": "Aún no tienes ganancias."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "no_methods": {[m
+[32m+[m[32m        "en": "You don't have a payout method yet. Let's add one.",[m
+[32m+[m[32m        "es": "No tienes un método de cobro aún. Vamos a agregar uno."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "choose_method": {[m
+[32m+[m[32m        "en": "Choose a payout method:",[m
+[32m+[m[32m        "es": "Elige un método de cobro:"[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "enter_method_details": {[m
+[32m+[m[32m        "en": "Send the details for **{method}** (e.g., email, ID, or account).",[m
+[32m+[m[32m        "es": "Envía los datos para **{method}** (por ejemplo, correo, ID o cuenta)."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "method_saved": {[m
+[32m+[m[32m        "en": "✅ Method saved and set as default.",[m
+[32m+[m[32m        "es": "✅ Método guardado y establecido como predeterminado."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "withdraw_created": {[m
+[32m+[m[32m        "en": "✅ Withdrawal request created for {amount}. We will notify admins to process it.",[m
+[32m+[m[32m        "es": "✅ Solicitud de retiro creada por {amount}. Notificaremos a los admins para procesarlo."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "insufficient_funds": {[m
+[32m+[m[32m        "en": "Insufficient available balance.",[m
+[32m+[m[32m        "es": "Saldo disponible insuficiente."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "invalid_amount": {[m
+[32m+[m[32m        "en": "Please provide a valid amount.",[m
+[32m+[m[32m        "es": "Por favor indica un monto válido."[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "admin_withdraw_notice": {[m
+[32m+[m[32m        "en": ([m
+[32m+[m[32m            "📥 New withdrawal request\n"[m
+[32m+[m[32m            "User: {user_id} (@{username})\n"[m
+[32m+[m[32m            "Amount: {amount}\n"[m
+[32m+[m[32m            "Method: {method} {details}\n"[m
+[32m+[m[32m            "Payment ID: {pid}"[m
+[32m+[m[32m        ),[m
+[32m+[m[32m        "es": ([m
+[32m+[m[32m            "📥 Nueva solicitud de retiro\n"[m
+[32m+[m[32m            "Usuario: {user_id} (@{username})\n"[m
+[32m+[m[32m            "Monto: {amount}\n"[m
+[32m+[m[32m            "Método: {method} {details}\n"[m
+[32m+[m[32m            "ID de pago: {pid}"[m
+[32m+[m[32m        ),[m
+[32m+[m[32m    },[m
+[32m+[m[32m    "marked_paid": {[m
+[32m+[m[32m        "en": "✅ Payment #{pid} marked as PAID.",[m
+[32m+[m[32m        "es": "✅ Pago #{pid} marcado como PAID."[m
+[32m+[m[32m    },[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef t(key: str, lang: str, **kwargs) -> str:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Translate a message by key and language, formatting with kwargs.[m
+[32m+[m[32m    Falls back to English if missing.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    entry = TEXTS.get(key, {})[m
+[32m+[m[32m    msg = entry.get(lang) or entry.get("en") or ""[m
+[32m+[m[32m    return msg.format(**kwargs)[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== DB: Schema ==================[m
+[32m+[m[32mCREATE_USERS = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS users ([m
+[32m+[m[32m    user_id      INTEGER PRIMARY KEY,[m
+[32m+[m[32m    phone        TEXT UNIQUE,[m
+[32m+[m[32m    code         TEXT UNIQUE,[m
+[32m+[m[32m    assigned_at  TEXT,[m
+[32m+[m[32m    country_code TEXT,[m
+[32m+[m[32m    total_points  INTEGER NOT NULL DEFAULT 0[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32mALTER_USERS_ADD_COUNTRY = "ALTER TABLE users ADD COLUMN country_code TEXT;"[m
+[32m+[m[32mALTER_REFERRALS_ADD_APPROVED = "ALTER TABLE referrals ADD COLUMN approved INTEGER NOT NULL DEFAULT 0;"[m
+[32m+[m[32mALTER_REFERRALS_ADD_POINTS = "ALTER TABLE referrals ADD COLUMN points_awarded INTEGER NOT NULL DEFAULT 0;"[m
+[32m+[m[32mALTER_USERS_ADD_TOTAL_POINTS = "ALTER TABLE users ADD COLUMN total_points INTEGER NOT NULL DEFAULT 0;"[m
+[32m+[m
+[32m+[m[32mCREATE_IDX_USERS_CODE_UNIQUE = "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_code_unique ON users(code);"[m
+[32m+[m[32mCREATE_IDX_USERS_PHONE = "CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);"[m
+[32m+[m[32mCREATE_IDX_USERS_ASSIGNED_AT = "CREATE INDEX IF NOT EXISTS idx_users_assigned_at ON users(assigned_at);"[m
+[32m+[m[32mCREATE_IDX_USERS_COUNTRY = "CREATE INDEX IF NOT EXISTS idx_users_country ON users(country_code);"[m
+[32m+[m[32mCREATE_IDX_REFERRALS_REFERRER = "CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_user_id);"[m
+[32m+[m[32mCREATE_IDX_REFERRALS_REFEREE  = "CREATE INDEX IF NOT EXISTS idx_referrals_referee  ON referrals(referee_user_id);"[m
+[32m+[m[32mCREATE_IDX_REFERRALS_CAMPAIGN = "CREATE INDEX IF NOT EXISTS idx_referrals_campaign ON referrals(campaign_id);"[m
+[32m+[m
+[32m+[m[32mCREATE_CAMPAIGNS = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS campaigns ([m
+[32m+[m[32m  id            INTEGER PRIMARY KEY,[m
+[32m+[m[32m  name          TEXT NOT NULL,[m
+[32m+[m[32m  starts_at     TEXT,[m
+[32m+[m[32m  ends_at       TEXT,[m
+[32m+[m[32m  reward_type   TEXT,[m
+[32m+[m[32m  reward_value  INTEGER,[m
+[32m+[m[32m  is_active     INTEGER[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32mCREATE_REFERRALS = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS referrals ([m
+[32m+[m[32m  id                INTEGER PRIMARY KEY,[m
+[32m+[m[32m  campaign_id       INTEGER NOT NULL,[m
+[32m+[m[32m  referrer_user_id  INTEGER NOT NULL,[m
+[32m+[m[32m  referee_user_id   INTEGER NOT NULL,[m
+[32m+[m[32m  code_used         TEXT NOT NULL,[m
+[32m+[m[32m  created_at        TEXT NOT NULL,[m
+[32m+[m[32m  status            TEXT NOT NULL,              -- PENDING/APPROVED/REJECTED[m
+[32m+[m[32m  approved          INTEGER NOT NULL DEFAULT 0, -- NEW[m
+[32m+[m[32m  points_awarded    INTEGER NOT NULL DEFAULT 0, -- NEW[m
+[32m+[m[32m  UNIQUE(campaign_id, referee_user_id),[m
+[32m+[m[32m  FOREIGN KEY (campaign_id) REFERENCES campaigns(id)[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32mCREATE_POINTS_HISTORY = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS points_history ([m
+[32m+[m[32m  id           INTEGER PRIMARY KEY,[m
+[32m+[m[32m  user_id      INTEGER NOT NULL,[m
+[32m+[m[32m  referral_id  INTEGER,[m
+[32m+[m[32m  points       INTEGER NOT NULL,[m
+[32m+[m[32m  reason       TEXT,[m
+[32m+[m[32m  created_at   TEXT NOT NULL,[m
+[32m+[m[32m  FOREIGN KEY (user_id) REFERENCES users(user_id),[m
+[32m+[m[32m  FOREIGN KEY (referral_id) REFERENCES referrals(id)[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32m# NEW: payout methods & payments[m
+[32m+[m[32mCREATE_PAYOUT_METHODS = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS payout_methods ([m
+[32m+[m[32m  id           INTEGER PRIMARY KEY,[m
+[32m+[m[32m  user_id      INTEGER NOT NULL,[m
+[32m+[m[32m  method_type  TEXT NOT NULL,      -- e.g., Paypal, BinancePay, Bank, SINPE[m
+[32m+[m[32m  details_json TEXT NOT NULL,      -- JSON payload with the specific fields[m
+[32m+[m[32m  is_default   INTEGER NOT NULL DEFAULT 0,[m
+[32m+[m[32m  created_at   TEXT NOT NULL,[m
+[32m+[m[32m  FOREIGN KEY (user_id) REFERENCES users(user_id)[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32mCREATE_PAYMENTS = """[m
+[32m+[m[32mCREATE TABLE IF NOT EXISTS payments ([m
+[32m+[m[32m  id             INTEGER PRIMARY KEY,[m
+[32m+[m[32m  user_id        INTEGER NOT NULL,[m
+[32m+[m[32m  amount_cents   INTEGER NOT NULL,[m
+[32m+[m[32m  status         TEXT NOT NULL,    -- REQUESTED/APPROVED/PAID/REJECTED/CANCELED[m
+[32m+[m[32m  method_id      INTEGER,[m
+[32m+[m[32m  requested_at   TEXT NOT NULL,[m
+[32m+[m[32m  processed_at   TEXT,[m
+[32m+[m[32m  note           TEXT,[m
+[32m+[m[32m  FOREIGN KEY (user_id) REFERENCES users(user_id),[m
+[32m+[m[32m  FOREIGN KEY (method_id) REFERENCES payout_methods(id)[m
+[32m+[m[32m);[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m[32mCREATE_IDX_PAYMENTS_USER = "CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);"[m
+[32m+[m[32mCREATE_IDX_PAYMENTS_STATUS = "CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);"[m
+[32m+[m[32mCREATE_IDX_METHODS_USER = "CREATE INDEX IF NOT EXISTS idx_methods_user ON payout_methods(user_id);"[m
+[32m+[m
+[32m+[m[32mSEED_DEFAULT_CAMPAIGN = """[m
+[32m+[m[32mINSERT INTO campaigns (id, name, starts_at, ends_at, reward_type, reward_value, is_active)[m
+[32m+[m[32mVALUES (1, 'Default Referral Campaign', NULL, NULL, 'points', 1, 1)[m
+[32m+[m[32mON CONFLICT(id) DO NOTHING;[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== DB: Initialization ==================[m
+[32m+[m[32masync def init_db():[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute("PRAGMA journal_mode=WAL;")[m
+[32m+[m[32m        await db.execute("PRAGMA synchronous=NORMAL;")[m
+[32m+[m[32m        await db.execute("PRAGMA foreign_keys = ON;")[m
+[32m+[m
+[32m+[m[32m        # 1) Base tables[m
+[32m+[m[32m        await db.execute(CREATE_USERS)[m
+[32m+[m
+[32m+[m[32m        # 2) Existing ALTERs[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await db.execute(ALTER_USERS_ADD_COUNTRY)[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m
+[32m+[m[32m        # 3) Campaigns & referrals[m
+[32m+[m[32m        await db.execute(CREATE_CAMPAIGNS)[m
+[32m+[m[32m        await db.execute(CREATE_REFERRALS)[m
+[32m+[m
+[32m+[m[32m        # 4) Backfill ALTERs on existing schemas[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await db.execute(ALTER_REFERRALS_ADD_APPROVED)[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await db.execute(ALTER_REFERRALS_ADD_POINTS)[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await db.execute(ALTER_USERS_ADD_TOTAL_POINTS)[m
+[32m+[m[32m        except Exception:[m
+[32m+[m[32m            pass[m
+[32m+[m
+[32m+[m[32m        # 5) New payout-related tables[m
+[32m+[m[32m        await db.execute(CREATE_PAYOUT_METHODS)[m
+[32m+[m[32m        await db.execute(CREATE_PAYMENTS)[m
+[32m+[m
+[32m+[m[32m        # 6) Indexes[m
+[32m+[m[32m        await db.execute(CREATE_IDX_USERS_CODE_UNIQUE)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_USERS_PHONE)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_USERS_ASSIGNED_AT)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_USERS_COUNTRY)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_REFERRALS_REFERRER)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_REFERRALS_REFEREE)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_REFERRALS_CAMPAIGN)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_PAYMENTS_USER)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_PAYMENTS_STATUS)[m
+[32m+[m[32m        await db.execute(CREATE_IDX_METHODS_USER)[m
+[32m+[m
+[32m+[m[32m        # 7) Seed default campaign[m
+[32m+[m[32m        await db.execute(SEED_DEFAULT_CAMPAIGN)[m
+[32m+[m
+[32m+[m[32m        await db.commit()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== DB: Helpers ==================[m
+[32m+[m[32masync def get_existing_code_by_user(user_id: int):[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute("SELECT code FROM users WHERE user_id = ?", (user_id,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return row[0] if row else None[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def get_code_by_phone(phone: str):[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute("SELECT user_id, code FROM users WHERE phone = ?", (phone,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return row if row else None[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def find_user_by_code(code: str):[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute("SELECT user_id FROM users WHERE code = ?", (code,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return row[0] if row else None[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def referee_already_referred(campaign_id: int, referee_user_id: int) -> bool:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            "SELECT 1 FROM referrals WHERE campaign_id=? AND referee_user_id=? LIMIT 1",[m
+[32m+[m[32m            (campaign_id, referee_user_id)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return bool(await cur.fetchone())[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def insert_referral(campaign_id: int, referrer_user_id: int, referee_user_id: int, code_used: str):[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            """[m
+[32m+[m[32m            INSERT INTO referrals ([m
+[32m+[m[32m                campaign_id, referrer_user_id, referee_user_id, code_used, created_at, status, approved, points_awarded[m
+[32m+[m[32m            )[m
+[32m+[m[32m            VALUES (?, ?, ?, ?, ?, 'PENDING', 0, 0)[m
+[32m+[m[32m            """,[m
+[32m+[m[32m            (campaign_id, referrer_user_id, referee_user_id, code_used, utcnow_iso())[m
+[32m+[m[32m        )[m
+[32m+[m[32m        await db.commit()[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def is_reciprocal_referral(campaign_id: int, a_user_id: int, b_user_id: int) -> bool:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Returns True if there already exists a referral b -> a in the same campaign.[m
+[32m+[m[32m    Prevents cycles like a->b and b->a within one campaign.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            """[m
+[32m+[m[32m            SELECT 1 FROM referrals[m
+[32m+[m[32m            WHERE campaign_id=? AND referrer_user_id=? AND referee_user_id=?[m
+[32m+[m[32m            LIMIT 1[m
+[32m+[m[32m            """,[m
+[32m+[m[32m            (campaign_id, b_user_id, a_user_id)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return bool(await cur.fetchone())[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# Approve referral & award points[m
+[32m+[m[32masync def approve_referral_and_award_points(referral_id: int, points: int) -> bool:[m
+[32m+[m[32m    if points is None:[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        points = int(points)[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if points < 0 or points > 1_000_000:[m
+[32m+[m[32m        return False[m
+[32m+[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute("PRAGMA foreign_keys = ON;")[m
+[32m+[m[32m        await db.execute("BEGIN IMMEDIATE;")[m
+[32m+[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            "SELECT referrer_user_id, approved FROM referrals WHERE id=?",[m
+[32m+[m[32m            (referral_id,)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        if not row:[m
+[32m+[m[32m            await db.execute("ROLLBACK;")[m
+[32m+[m[32m            return False[m
+[32m+[m[32m        referrer_user_id, approved = row[m
+[32m+[m[32m        if approved:[m
+[32m+[m[32m            await db.execute("ROLLBACK;")[m
+[32m+[m[32m            return False[m
+[32m+[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            "UPDATE referrals SET approved=1, status='APPROVED', points_awarded=? WHERE id=?",[m
+[32m+[m[32m            (points, referral_id)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            "UPDATE users SET total_points = COALESCE(total_points, 0) + ? WHERE user_id=?",[m
+[32m+[m[32m            (points, referrer_user_id)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            """[m
+[32m+[m[32m            INSERT INTO points_history (user_id, referral_id, points, reason, created_at)[m
+[32m+[m[32m            VALUES (?, ?, ?, 'approved_referral', ?)[m
+[32m+[m[32m            """,[m
+[32m+[m[32m            (referrer_user_id, referral_id, points, utcnow_iso())[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        await db.commit()[m
+[32m+[m[32m        return True[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def get_user_points(user_id: int) -> int:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute("SELECT COALESCE(total_points, 0) FROM users WHERE user_id=?", (user_id,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return int(row[0]) if row else 0[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ======== Earnings and Payout Helpers ========[m
+[32m+[m[32masync def count_approved_referrals(user_id: int) -> int:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            "SELECT COUNT(1) FROM referrals WHERE referrer_user_id=? AND approved=1",[m
+[32m+[m[32m            (user_id,)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return int(row[0] or 0)[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def sum_payments_cents(user_id: int, statuses: Tuple[str, ...]) -> int:[m
+[32m+[m[32m    placeholders = ",".join(["?"] * len(statuses))[m
+[32m+[m[32m    query = f"SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=? AND status IN ({placeholders})"[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        cur = await db.execute(query, (user_id, *statuses))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return int(row[0] or 0)[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def compute_balances(user_id: int) -> Tuple[int, int, int, int]:[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Returns (approved_count, gross_cents, paid_cents, pending_cents)[m
+[32m+[m[32m    available = gross - paid. (We don't lock pending by default.)[m
+[32m+[m[32m    """[m
+[32m+[m[32m    approved = await count_approved_referrals(user_id)[m
+[32m+[m[32m    gross = approved * COMMISSION_PER_APPROVED_CENTS[m
+[32m+[m[32m    paid = await sum_payments_cents(user_id, ("PAID",))[m
+[32m+[m[32m    pending = await sum_payments_cents(user_id, ("REQUESTED", "APPROVED"))[m
+[32m+[m[32m    return approved, gross, paid, pending[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def get_user_methods(user_id: int) -> List[sqlite3.Row]:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        db.row_factory = sqlite3.Row[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            "SELECT id, method_type, details_json, is_default FROM payout_methods WHERE user_id=? ORDER BY is_default DESC, id DESC",[m
+[32m+[m[32m            (user_id,)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return await cur.fetchall()[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def add_payout_method(user_id: int, method_type: str, details: dict, set_default: bool = True) -> int:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            "INSERT INTO payout_methods (user_id, method_type, details_json, is_default, created_at) VALUES (?,?,?,?,?)",[m
+[32m+[m[32m            (user_id, method_type, json.dumps(details, ensure_ascii=False), 1 if set_default else 0, utcnow_iso())[m
+[32m+[m[32m        )[m
+[32m+[m[32m        # If setting this as default, clear others[m
+[32m+[m[32m        if set_default:[m
+[32m+[m[32m            await db.execute([m
+[32m+[m[32m                "UPDATE payout_methods SET is_default=0 WHERE user_id=? AND id <> (SELECT MAX(id) FROM payout_methods WHERE user_id=?)",[m
+[32m+[m[32m                (user_id, user_id)[m
+[32m+[m[32m            )[m
+[32m+[m[32m        await db.commit()[m
+[32m+[m[32m        # Return last row id[m
+[32m+[m[32m        cur = await db.execute("SELECT MAX(id) FROM payout_methods WHERE user_id=?", (user_id,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return int(row[0])[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def get_default_method(user_id: int) -> Optional[sqlite3.Row]:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        db.row_factory = sqlite3.Row[m
+[32m+[m[32m        cur = await db.execute([m
+[32m+[m[32m            "SELECT id, method_type, details_json FROM payout_methods WHERE user_id=? AND is_default=1 ORDER BY id DESC LIMIT 1",[m
+[32m+[m[32m            (user_id,)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return await cur.fetchone()[m
+[32m+[m
+[32m+[m
+[32m+[m[32masync def create_withdraw_request(user_id: int, amount_cents: int, method_id: int, note: Optional[str] = None) -> int:[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute([m
+[32m+[m[32m            "INSERT INTO payments (user_id, amount_cents, status, method_id, requested_at, note) VALUES (?,?,?,?,?,?)",[m
+[32m+[m[32m            (user_id, amount_cents, "REQUESTED", method_id, utcnow_iso(), note)[m
+[32m+[m[32m        )[m
+[32m+[m[32m        await db.commit()[m
+[32m+[m[32m        cur = await db.execute("SELECT MAX(id) FROM payments WHERE user_id=?", (user_id,))[m
+[32m+[m[32m        row = await cur.fetchone()[m
+[32m+[m[32m        return int(row[0])[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== Code Assignment ==================[m
+[32m+[m[32masync def assign_or_get_code(user_id: int, phone_e164: str, prefix_override: str, country_code: str) -> Optional[str]:[m
+[32m+[m[32m    existing = await get_existing_code_by_user(user_id)[m
+[32m+[m[32m    if existing:[m
+[32m+[m[32m        return existing[m
+[32m+[m
+[32m+[m[32m    phone_owner = await get_code_by_phone(phone_e164)[m
+[32m+[m[32m    if phone_owner:[m
+[32m+[m[32m        _, code = phone_owner[m
+[32m+[m[32m        return code[m
+[32m+[m[32m    async with aiosqlite.connect(DB_PATH) as db:[m
+[32m+[m[32m        await db.execute("PRAGMA journal_mode=WAL;")[m
+[32m+[m[32m        await db.execute("PRAGMA synchronous=NORMAL;")[m
+[32m+[m
+[32m+[m[32m        for _ in range(5):[m
+[32m+[m[32m            code = build_random_code(prefix=prefix_override or "RF", length=8)[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                await db.execute([m
+[32m+[m[32m                    """[m
+[32m+[m[32m                    INSERT INTO users (user_id, phone, code, assigned_at, country_code)[m
+[32m+[m[32m                    VALUES (?, ?, ?, ?, ?)[m
+[32m+[m[32m                    ON CONFLICT(user_id) DO UPDATE SET[m[41m [m
+[32m+[m[32m                        phone=excluded.phone,[m
+[32m+[m[32m                        code=excluded.code,[m
+[32m+[m[32m                        assigned_at=excluded.assigned_at,[m
+[32m+[m[32m                        country_code=excluded.country_code[m
+[32m+[m[32m                    """,[m
+[32m+[m[32m                    (user_id, phone_e164, code, utcnow_iso(), country_code)[m
+[32m+[m[32m                )[m
+[32m+[m[32m                await db.commit()[m
+[32m+[m[32m                return code[m
+[32m+[m[32m            except sqlite3.IntegrityError as e:[m
+[32m+[m[32m                msg = str(e).lower()[m
+[32m+[m[32m                if "unique" in msg and "users(code)" in msg:[m
+[32m+[m[32m                    continue[m
+[32m+[m[32m                if "unique" in msg and "users.phone" in msg:[m
+[32m+[m[32m                    row = await get_code_by_phone(phone_e164)[m
+[32m+[m[32m                    if row:[m
+[32m+[m[32m                        _, existing_code = row[m
+[32m+[m[32m                        return existing_code[m
+[32m+[m[32m                raise[m
+[32m+[m[32m    return None[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== UI ==================[m
+[32m+[m
+[32m+[m[32mdef share_phone_kb(lang: str):[m
+[32m+[m[32m    return ReplyKeyboardMarkup([m
+[32m+[m[32m        keyboard=[[KeyboardButton(text=TEXTS["share_phone_button"][lang], request_contact=True)]],[m
+[32m+[m[32m        resize_keyboard=True,[m
+[32m+[m[32m        one_time_keyboard=True[m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef remember_kb(lang: str):[m
+[32m+[m[32m    return InlineKeyboardMarkup([m
+[32m+[m[32m        inline_keyboard=[[InlineKeyboardButton(text=TEXTS["remember_button"][lang], callback_data="remember_code")]][m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef referral_button(lang: str):[m
+[32m+[m[32m    return InlineKeyboardMarkup([m
+[32m+[m[32m        inline_keyboard=[[InlineKeyboardButton(text=TEXTS["referral_button"][lang], callback_data="enter_referral")]][m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef group_link_button(lang: str):[m
+[32m+[m[32m    return InlineKeyboardMarkup([m
+[32m+[m[32m        inline_keyboard=[[InlineKeyboardButton(text=TEXTS["group_link_button"][lang], callback_data="get_group_link")]][m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef payout_methods_kb(lang: str):[m
+[32m+[m[32m    return InlineKeyboardMarkup([m
+[32m+[m[32m        inline_keyboard=[[m
+[32m+[m[32m            [InlineKeyboardButton(text="PayPal 💵", callback_data="pm:Paypal")],[m
+[32m+[m[32m            [InlineKeyboardButton(text="Binance Pay ID 🚀", callback_data="pm:BinancePay")],[m
+[32m+[m[32m            [InlineKeyboardButton(text="USDT (TRC20) 🪙", callback_data="pm:USDT_TRC20")],[m
+[32m+[m[32m            [InlineKeyboardButton(text="SINPE Móvil 🇨🇷", callback_data="pm:SINPE")],[m
+[32m+[m[32m                    ][m
+[32m+[m[32m    )[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ================== Handlers ==================[m
+[32m+[m
+[32m+[m[32m@dp.message(CommandStart())[m
+[32m+[m[32masync def on_start(message: Message):[m
+[32m+[m[32m    lang = get_lang(message.from_user)[m
+[32m+[m[32m    existing = await get_existing_code_by_user(message.from_user.id)[m
+[32m+[m[32m    if existing:[m
+[32m+[m[32m        await message.answer(t("already_has_code", lang), reply_markup=remember_kb(lang))[m
+[32m+[m[32m        await message.answer(t("optional_enter_code", lang), reply_markup=referral_button(lang))[m
+[32m+[m[32m        if GROUP_CHAT_ID:[m
+[32m+[m[32m            await message.answer(t("group_ready", lang), reply_markup=group_link_button(lang))[m
+[32m+[m[32m        return[m
+[32m+[m[32m    await message.answer(t("start", lang), reply_markup=share_phone_kb(lang))[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@dp.message(F.contact)[m
+[32m+[m[32masync def on_contact(message: Message):[m
+[32m+[m[32m    lang = get_lang(message.from_user)[m
+[32m+[m[32m    c = message.contact[m
+[32m+[m
+[32m+[m[32m    logging.info("[DEBUG contact] from_user.id=%s contact.user_id=%s phone=%s",[m
+[32m+[m[32m                 message.from_user.id,[m
+[32m+[m[32m                 getattr(c, "user_id", None),[m
+[32m+[m[32m                 c.phone_number)[m
+[32m+[m
+[32m+[m[32m    if not getattr(c, "user_id", None) or c.user_id != message.from_user.id:[m
+[32m+[m[32m        await message.answer(t("share_own_number", lang))[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    phone_e164 = e164(c.phone_number)[m
+[32m+[m[32m    if not phone_e164:[m
+[32m+[m[32m        await message.answer(t("invalid_number", lang))[m
+[32m+[m[32m        return[m
+[32m+[m[32m    region = country_code_from_phone(c.phone_number)[m
+[32m+[m
+[32m+[m[32m    code = await assign_or_get_code(message.from_user.id, phone_e164, prefix_override=region, country_code=region)[m
+[32m+[m[32m    if not code:[m
+[32m+[m[32m        await message.answer(t("error", lang, err="Could not generate your code. Try again."))[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    await message.answer(t("phone_verified", lang, region=region, code=code), reply_markup=ReplyKeyboardRemove(lang))[m
+[32m+[m[32m    await message.answer(t("remember_offer", lang), reply_markup=remember_kb(lang))[m
+[32m+[m[32m    await message.answer(t("enter_inviter_code", lang), reply_markup=referral_button(lang))[m
+[32m+[m
+[32m+[m[32m    if GROUP_CHAT_ID:[m
+[32m+[m[32m        invite = await create_one_time_invite(message.bot, GROUP_CHAT_ID, message.from_user.id, INVITE_TTL_HOURS)[m
+[32m+[m[32m        if invite:[m
+[32m+[m[32m            await message.answer(t("group_access", lang, hours=INVITE_TTL_HOURS, link=invite))[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            await message.answer(t("group_invite_fail", lang))[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@dp.message(Command("mycode"))[m
+[32m+[m[32m@dp.message(Command("micodigo"))[m
+[32m+[m[32masync def cmd_micodigo(message: Message):[m
+[32m+[m[32m    lang = get_lang(message.from_user)[m
+[32m+[m[32m    code = await get_existing_code_by_user(message.from_user.id)[m
+[32m+[m[32m    if code:[m
+[32m+[m[32m        await message.answer(t("mycode_has", lang, code=code))[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        await message.answer(t("mycode_missing", lang))[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@dp.callback_query(F.data == "remember_code")[m
+[32m+[m[32masync def cb_remember(callback: CallbackQuery):[m
+[32m+[m[32m    lang = get_lang(callback.from_user)[m
+[32m+[m[32m    code = await get_existing_code_by_user(callback.from_user.id)[m
+[32m+[m[32m    if code:[m
+[32m+[m[32m        await callback.message.answer(t("mycode_has", lang, code=code))[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        await callback.message.answer(t("mycode_missing", lang))[m
+[32m+[m[32m    await callback.answer()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ======= Referrals Flow (ForceReply) =======[m
+[32m+[m[32m@dp.callback_query(F.data == "enter_referral")[m
+[32m+[m[32masync def cb_enter_referral(q: CallbackQuery):[m
+[32m+[m[32m    lang = get_lang(q.from_user)[m
+[32m+[m[32m    prompt = t("referral_prompt", lang) + "\n\n#REFERRAL_PROMPT"[m
+[32m+[m[32m    await q.message.answer(prompt, reply_markup=ForceReply(selective=True))[m
+[32m+[m[32m    await q.answer()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m@dp.message(F.reply_to_message, F.text)[m
+[32m+[m[32masync def on_force_reply_inputs(message: Message):[m
+[32m+[m[32m    """[m
+[32m+[m[32m    Handles both referral code input and payout method details via ForceReply markers.[m
+[32m+[m[32m    """[m
+[32m+[m[32m    lang = get_lang(message.from_user)[m
+[32m+[m[32m    if not message.reply_to_message or not message.reply_to_message.text:[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    ref_lower = message.reply_to_message.text.lower()[m
+[32m+[m
+[32m+[m[32m    # Referral code input[m
+[32m+[m[32m    if "#referral_prompt" in ref_lower:[m
+[32m+[m[32m        referee_id = message.from_user.id[m
+[32m+[m[32m        raw = message.text.strip().upper()[m
+[32m+[m[32m        code = ([m
+[32m+[m[32m            raw.replace(" ", "")[m
+[32m+[m[32m               .replace("_", "")[m
+[32m+[m[32m               .replace("—", "-")[m
+[32m+[m[32m               .replace("–", "-")[m
+[32m+[m[32m        )[m
+[32m+[m[32m        referrer_id = await find_user_by_code(code)[m
+[32m+[m[32m        if not referrer_id:[m
+[32m+[m[32m            await message.answer(t("invalid_referral", lang)); return[m
+[32m+[m[32m        if referrer_id == referee_id:[m
+[32m+[m[32m            await message.answer(t("self_referral", lang)); return[m
+[32m+[m[32m        if await referee_already_referred(ACTIVE_CAMPAIGN_ID, referee_id):[m
+[32m+[m[32m            await message.answer(t("already_referred", lang)); return[m
+[32m+[m[32m        if await is_reciprocal_referral(ACTIVE_CAMPAIGN_ID, referee_id, referrer_id):[m
+[32m+[m[32m            await message.answer(t("reciprocal_blocked", lang)); return[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await insert_referral(ACTIVE_CAMPAIGN_ID, referrer_id, referee_id, code)[m
+[32m+[m[32m        except sqlite3.IntegrityError:[m
+[32m+[m[32m            await message.answer(t("already_referred", lang)); return[m
+[32m+[m[32m        await message.answer(t("referral_done", lang))[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m[32m    # Payout method details input[m
+[32m+[m[32m    m = re.search(r"#ADD_METHOD_DETAILS:([A-Za-z0-9_]+)(?::(\d+))?", message.reply_to_message.text)[m
+[32m+[m[32m    if m:[m
+[32m+[m[32m        method_type = m.group(1)[m
+[32m+[m[32m        amount_cents = int(m.group(2) or 0)[m
+[32m+[m[32m        details_text = message.text.strip()[m
+[32m+[m[32m        # Store as {"value": details_text}[m
+[32m+[m[32m        method_id = await add_payout_method(message.from_user.id, method_type, {"value": details_text}, set_default=True)[m
+[32m+[m[32m        await message.answer(t("method_saved", lang))[m
+[32m+[m[32m        if amount_cents > 0:[m
+[32m+[m[32m            pid = await create_withdraw_request(message.from_user.id, amount_cents, method_id)[m
+[32m+[m[32m            pretty = format_money(amount_cents)[m
+[32m+[m[32m            await message.answer(t("withdraw_created", lang, amount=pretty))[m
+[32m+[m[32m            await notify_withdraw(message.bot, message.from_user, pid, amount_cents, method_type, details_text, lang)[m
+[32m+[m[32m        return[m
+[32m+[m
+[32m+[m
+[32m+[m[32m# ======= Get group link on demand =======[m
+[32m+[m[32m@dp.callback_query(F.data == "get_group_link")[m
+[32m+[m[32masync def cb_get_group_link(q: CallbackQuery):[m
+[32m+[m[32m    lang = get_lang(q.from_user)[m
+[32m+[m[32m    if not GROUP_CHAT_ID:[m
+[32m+[m[32m        await q.message.answer(t("group_missing_env", lang)); await q.answer(); return[m
+[32m+[m
+[32m+[m[32m    # Check ban[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        member = await q.bot.get_chat_member(GROUP_CHAT_ID, q.from_user.id)[m
+[32m+[m[32m        if getattr(member, "status", None) == "kicked":[m
+[32m+[m[32m            await q.message.answer(t("banned_message", lang))[m
+[32m+[m[32m            await q.answer()[m
+[32m+[m[32m            return[m
+[32m+[m[32m    except Exception:[m
+[32m+[m[32m        pass[m
+[32m+[m
+[32m+[m[32m    # Create one-time invite link[m
+[32m+[m[32m    invite = await create_one_time_invite(q.bot, GROUP_CHAT_ID, q.from_user.id, INVITE_TTL_HOURS)[m
+[32m+[m[32m    if invite:[m
+[32m+[m[32m        await q.message.answer(t("group_link", lang, hours=INVITE_TTL_HOURS, link=invite))[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        await q.message.answer(t("group_invite_fail_short", lang))[m
+[32m+[m[32m    await q.answer()[m
+[32m+[m
+[32m+[m
+[32m+[m[32m
