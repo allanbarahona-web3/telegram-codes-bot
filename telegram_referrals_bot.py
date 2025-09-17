@@ -1,33 +1,54 @@
-#
-#
-# Requirements (same as before): aiogram v3, aiosqlite, phonenumbers, python-dotenv
+# -*- coding: utf-8 -*-
 
+# 1) Cargar envs (QA/Prod y luego DEV si existe)
+from dotenv import load_dotenv
+load_dotenv(".env")                     # QA/Prod
+load_dotenv(".env.dev", override=True)  # DEV (si existe)
+
+# 2) Imports estándar
 import os
 import re
 import json
 import asyncio
-import datetime
-import sqlite3
 import secrets
 from typing import Optional, Tuple, List
-import csv
 from datetime import datetime as dt
-from aiogram import Bot, Dispatcher, F, types
 import logging
+import sqlite3  # solo for error annotation (sqlite3.Row)
+from datetime import datetime, timedelta
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+# 3) Aiogram
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ForceReply
 )
 
-from dotenv import load_dotenv
-import aiosqlite
-import phonenumbers   # phone number normalization
+# 4) Terceros
+import phonenumbers  # phone number normalization
+
+# 5) Capa de datos (dual: sqlite/postgres)
+from db_repo import (
+    init_db,
+    upsert_user,
+    get_existing_code_by_user,
+    find_user_by_code,
+    referee_already_referred,
+    is_reciprocal_referral,
+    insert_referral,
+    get_user_points,
+    compute_balances,
+    get_code_by_phone,
+    DB_BACKEND,
+)
+
+# 6) Logging básico + confirma backend
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.info(f"DB_BACKEND={DB_BACKEND}  DATABASE_URL={'set' if os.getenv('DATABASE_URL') else 'unset'}")
+
+
+
 
 # ================== Config ==================
 load_dotenv(".env.dev")
@@ -54,13 +75,21 @@ ACTIVE_CAMPAIGN_ID = 1
 
 # ================== Utilities ==================
 
+# Helper: Get ISO country code from E.164 phone number
+def country_code_from_phone(phone_e164: str) -> str | None:
+    try:
+        num = phonenumbers.parse(phone_e164, None)
+        return phonenumbers.region_code_for_number(num)
+    except Exception:
+        return None
+
 # Helper to create one-time invite links with expiration
 async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours: int = 12) -> Optional[str]:
     """
     Requires the bot to be admin of the group with invite link creation permissions.
     """
     try:
-        expires_at = int((datetime.datetime.utcnow() + datetime.timedelta(hours=ttl_hours)).timestamp())
+        expires_at = int((datetime.utcnow() + timedelta(hours=ttl_hours)).timestamp())
         link = await bot.create_chat_invite_link(
             chat_id=chat_id,
             name=f"one-use-{user_id}",
@@ -71,6 +100,8 @@ async def create_one_time_invite(bot: Bot, chat_id: str, user_id: int, ttl_hours
     except Exception as e:
         logging.error(f"Failed to create invite link: {e}")
         return None
+
+
 ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # excluding 0/O/1/I for readability
 
 
@@ -459,259 +490,6 @@ ON CONFLICT(id) DO NOTHING;
 
 
 # ================== DB: Initialization ==================
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA synchronous=NORMAL;")
-        await db.execute("PRAGMA foreign_keys = ON;")
-
-        # 1) Base tables
-        await db.execute(CREATE_USERS)
-
-        # 2) Existing ALTERs
-        try:
-            await db.execute(ALTER_USERS_ADD_COUNTRY)
-        except Exception:
-            pass
-
-        # 3) Campaigns & referrals
-        await db.execute(CREATE_CAMPAIGNS)
-        await db.execute(CREATE_REFERRALS)
-
-        # 4) Backfill ALTERs on existing schemas
-        try:
-            await db.execute(ALTER_REFERRALS_ADD_APPROVED)
-        except Exception:
-            pass
-        try:
-            await db.execute(ALTER_REFERRALS_ADD_POINTS)
-        except Exception:
-            pass
-        try:
-            await db.execute(ALTER_USERS_ADD_TOTAL_POINTS)
-        except Exception:
-            pass
-
-        # 5) New payout-related tables
-        await db.execute(CREATE_PAYOUT_METHODS)
-        await db.execute(CREATE_PAYMENTS)
-
-        # 6) Indexes
-        await db.execute(CREATE_IDX_USERS_CODE_UNIQUE)
-        await db.execute(CREATE_IDX_USERS_PHONE)
-        await db.execute(CREATE_IDX_USERS_ASSIGNED_AT)
-        await db.execute(CREATE_IDX_USERS_COUNTRY)
-        await db.execute(CREATE_IDX_REFERRALS_REFERRER)
-        await db.execute(CREATE_IDX_REFERRALS_REFEREE)
-        await db.execute(CREATE_IDX_REFERRALS_CAMPAIGN)
-        await db.execute(CREATE_IDX_PAYMENTS_USER)
-        await db.execute(CREATE_IDX_PAYMENTS_STATUS)
-        await db.execute(CREATE_IDX_METHODS_USER)
-
-        # 7) Seed default campaign
-        await db.execute(SEED_DEFAULT_CAMPAIGN)
-
-        await db.commit()
-
-
-# ================== DB: Helpers ==================
-async def get_existing_code_by_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT code FROM users WHERE user_id = ?", (user_id,))
-        row = await cur.fetchone()
-        return row[0] if row else None
-
-
-async def get_code_by_phone(phone: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, code FROM users WHERE phone = ?", (phone,))
-        row = await cur.fetchone()
-        return row if row else None
-
-
-async def find_user_by_code(code: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id FROM users WHERE code = ?", (code,))
-        row = await cur.fetchone()
-        return row[0] if row else None
-
-
-async def referee_already_referred(campaign_id: int, referee_user_id: int) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT 1 FROM referrals WHERE campaign_id=? AND referee_user_id=? LIMIT 1",
-            (campaign_id, referee_user_id)
-        )
-        return bool(await cur.fetchone())
-
-
-async def insert_referral(campaign_id: int, referrer_user_id: int, referee_user_id: int, code_used: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO referrals (
-                campaign_id, referrer_user_id, referee_user_id, code_used, created_at, status, approved, points_awarded
-            )
-            VALUES (?, ?, ?, ?, ?, 'PENDING', 0, 0)
-            """,
-            (campaign_id, referrer_user_id, referee_user_id, code_used, utcnow_iso())
-        )
-        await db.commit()
-
-
-async def is_reciprocal_referral(campaign_id: int, a_user_id: int, b_user_id: int) -> bool:
-    """
-    Returns True if there already exists a referral b -> a in the same campaign.
-    Prevents cycles like a->b and b->a within one campaign.
-    """
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            """
-            SELECT 1 FROM referrals
-            WHERE campaign_id=? AND referrer_user_id=? AND referee_user_id=?
-            LIMIT 1
-            """,
-            (campaign_id, b_user_id, a_user_id)
-        )
-        return bool(await cur.fetchone())
-
-
-# Approve referral & award points
-async def approve_referral_and_award_points(referral_id: int, points: int) -> bool:
-    if points is None:
-        return False
-    try:
-        points = int(points)
-    except Exception:
-        return False
-    if points < 0 or points > 1_000_000:
-        return False
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON;")
-        await db.execute("BEGIN IMMEDIATE;")
-
-        cur = await db.execute(
-            "SELECT referrer_user_id, approved FROM referrals WHERE id=?",
-            (referral_id,)
-        )
-        row = await cur.fetchone()
-        if not row:
-            await db.execute("ROLLBACK;")
-            return False
-        referrer_user_id, approved = row
-        if approved:
-            await db.execute("ROLLBACK;")
-            return False
-
-        await db.execute(
-            "UPDATE referrals SET approved=1, status='APPROVED', points_awarded=? WHERE id=?",
-            (points, referral_id)
-        )
-        await db.execute(
-            "UPDATE users SET total_points = COALESCE(total_points, 0) + ? WHERE user_id=?",
-            (points, referrer_user_id)
-        )
-        await db.execute(
-            """
-            INSERT INTO points_history (user_id, referral_id, points, reason, created_at)
-            VALUES (?, ?, ?, 'approved_referral', ?)
-            """,
-            (referrer_user_id, referral_id, points, utcnow_iso())
-        )
-
-        await db.commit()
-        return True
-
-
-async def get_user_points(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT COALESCE(total_points, 0) FROM users WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return int(row[0]) if row else 0
-
-
-# ======== Earnings and Payout Helpers ========
-async def count_approved_referrals(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT COUNT(1) FROM referrals WHERE referrer_user_id=? AND approved=1",
-            (user_id,)
-        )
-        row = await cur.fetchone()
-        return int(row[0] or 0)
-
-
-async def sum_payments_cents(user_id: int, statuses: Tuple[str, ...]) -> int:
-    placeholders = ",".join(["?"] * len(statuses))
-    query = f"SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=? AND status IN ({placeholders})"
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(query, (user_id, *statuses))
-        row = await cur.fetchone()
-        return int(row[0] or 0)
-
-
-async def compute_balances(user_id: int) -> Tuple[int, int, int, int]:
-    """
-    Returns (approved_count, gross_cents, paid_cents, pending_cents)
-    available = gross - paid. (We don't lock pending by default.)
-    """
-    approved = await count_approved_referrals(user_id)
-    gross = approved * COMMISSION_PER_APPROVED_CENTS
-    paid = await sum_payments_cents(user_id, ("PAID",))
-    pending = await sum_payments_cents(user_id, ("REQUESTED", "APPROVED"))
-    return approved, gross, paid, pending
-
-
-async def get_user_methods(user_id: int) -> List[sqlite3.Row]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = sqlite3.Row
-        cur = await db.execute(
-            "SELECT id, method_type, details_json, is_default FROM payout_methods WHERE user_id=? ORDER BY is_default DESC, id DESC",
-            (user_id,)
-        )
-        return await cur.fetchall()
-
-
-async def add_payout_method(user_id: int, method_type: str, details: dict, set_default: bool = True) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO payout_methods (user_id, method_type, details_json, is_default, created_at) VALUES (?,?,?,?,?)",
-            (user_id, method_type, json.dumps(details, ensure_ascii=False), 1 if set_default else 0, utcnow_iso())
-        )
-        # If setting this as default, clear others
-        if set_default:
-            await db.execute(
-                "UPDATE payout_methods SET is_default=0 WHERE user_id=? AND id <> (SELECT MAX(id) FROM payout_methods WHERE user_id=?)",
-                (user_id, user_id)
-            )
-        await db.commit()
-        # Return last row id
-        cur = await db.execute("SELECT MAX(id) FROM payout_methods WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return int(row[0])
-
-
-async def get_default_method(user_id: int) -> Optional[sqlite3.Row]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = sqlite3.Row
-        cur = await db.execute(
-            "SELECT id, method_type, details_json FROM payout_methods WHERE user_id=? AND is_default=1 ORDER BY id DESC LIMIT 1",
-            (user_id,)
-        )
-        return await cur.fetchone()
-
-
-async def create_withdraw_request(user_id: int, amount_cents: int, method_id: int, note: Optional[str] = None) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO payments (user_id, amount_cents, status, method_id, requested_at, note) VALUES (?,?,?,?,?,?)",
-            (user_id, amount_cents, "REQUESTED", method_id, utcnow_iso(), note)
-        )
-        await db.commit()
-        cur = await db.execute("SELECT MAX(id) FROM payments WHERE user_id=?", (user_id,))
-        row = await cur.fetchone()
-        return int(row[0])
 
 
 # ================== Code Assignment ==================
@@ -724,37 +502,23 @@ async def assign_or_get_code(user_id: int, phone_e164: str, prefix_override: str
     if phone_owner:
         _, code = phone_owner
         return code
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL;")
-        await db.execute("PRAGMA synchronous=NORMAL;")
 
-        for _ in range(5):
-            code = build_random_code(prefix=prefix_override or "RF", length=8)
-            try:
-                await db.execute(
-                    """
-                    INSERT INTO users (user_id, phone, code, assigned_at, country_code)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET 
-                        phone=excluded.phone,
-                        code=excluded.code,
-                        assigned_at=excluded.assigned_at,
-                        country_code=excluded.country_code
-                    """,
-                    (user_id, phone_e164, code, utcnow_iso(), country_code)
-                )
-                await db.commit()
-                return code
-            except sqlite3.IntegrityError as e:
-                msg = str(e).lower()
-                if "unique" in msg and "users(code)" in msg:
-                    continue
-                if "unique" in msg and "users.phone" in msg:
-                    row = await get_code_by_phone(phone_e164)
-                    if row:
-                        _, existing_code = row
-                        return existing_code
-                raise
+    # Try up to 5 times to generate a unique code
+    for _ in range(5):
+        code = build_random_code(prefix=prefix_override or "RF", length=8)
+        try:
+            await upsert_user(user_id, code, phone_e164)
+            return code
+        except Exception as e:
+            msg = str(e).lower()
+            if "unique" in msg and "code" in msg:
+                continue
+            if "unique" in msg and "phone" in msg:
+                row = await get_code_by_phone(phone_e164)
+                if row:
+                    _, existing_code = row
+                    return existing_code
+            raise
     return None
 
 
@@ -897,12 +661,13 @@ async def on_contact(message: Message):
     region = country_from_e164(phone_e164)
 
     code = await assign_or_get_code(message.from_user.id, phone_e164, prefix_override=region, country_code=region)
+    await upsert_user(message.from_user.id, code, phone_e164)
     if not code:
         await message.answer(t("error", lang, err="Could not generate your code. Try again."))
         return
 
     affiliate_link = f"https://t.me/{BOT_USERNAME}?start={code}"
-    msg_affiliate = t("your_affiliate_link", lang).format(link=affiliate_link)
+    msg_affiliate = t("your_affiliate_link", lang, link=affiliate_link)
 
     # Send verified phone, code, and affiliate link
     await message.answer(t("phone_verified", lang, region=region, code=code), reply_markup=ReplyKeyboardRemove())
@@ -977,12 +742,13 @@ async def on_force_reply_inputs(message: Message):
             await message.answer(t("invalid_referral", lang)); return
         if referrer_id == referee_id:
             await message.answer(t("self_referral", lang)); return
-        if await referee_already_referred(ACTIVE_CAMPAIGN_ID, referee_id):
+        campaign_id = str(ACTIVE_CAMPAIGN_ID)
+        if await referee_already_referred(campaign_id, referee_id):
             await message.answer(t("already_referred", lang)); return
-        if await is_reciprocal_referral(ACTIVE_CAMPAIGN_ID, referee_id, referrer_id):
+        if await is_reciprocal_referral(campaign_id, referee_id, referrer_id):
             await message.answer(t("reciprocal_blocked", lang)); return
         try:
-            await insert_referral(ACTIVE_CAMPAIGN_ID, referrer_id, referee_id, code)
+            await insert_referral(campaign_id, referrer_id, referee_id, code)
         except sqlite3.IntegrityError:
             await message.answer(t("already_referred", lang)); return
         await message.answer(t("referral_done", lang))
@@ -1327,4 +1093,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+
