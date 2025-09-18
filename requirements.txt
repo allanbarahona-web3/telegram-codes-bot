@@ -6,3 +6,4 @@ phonenumbers==8.13.40
 Babel==2.8.0
 python-dotenv==1.0.1
 psycopg[binary]==3.2.9
+psycopg_pool
