@@ -1,293 +1,226 @@
-# db_repo.py — capa de datos conmutada por env (sqlite/postgres)
-import os
-from typing import Optional
-
-DB_BACKEND = (os.getenv("DB_BACKEND") or "sqlite").strip().lower()
-
-# =========================
-# Backend: SQLite (aiosqlite)
-# =========================
-if DB_BACKEND == "sqlite":
-    async def get_default_method(user_id: int):
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("SELECT * FROM payout_methods WHERE user_id=? AND is_default=1 LIMIT 1", (user_id,)) as cur:
-                row = await cur.fetchone()
-                return dict(row) if row else None
-        finally:
-            await db.close()
-
-    async def create_withdraw_request(user_id: int, amount_cents: int, method_id: int):
-        db = await _sqlite_conn()
-        try:
-            await db.execute(
-                "INSERT INTO payments (user_id, amount_cents, status, method_id, requested_at) VALUES (?, ?, 'REQUESTED', ?, datetime('now'))",
-                (user_id, amount_cents, method_id)
-            )
-            await db.commit()
-            async with db.execute("SELECT MAX(id) FROM payments WHERE user_id=?", (user_id,)) as cur:
-                row = await cur.fetchone()
-                return int(row[0])
-        finally:
-            await db.close()
-    async def get_code_by_phone(phone_e164: str):
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("SELECT id, code FROM users WHERE phone=?", (phone_e164,)) as cur:
-                row = await cur.fetchone()
-                return (row["id"], row["code"]) if row else None
-        finally:
-            await db.close()
-    async def get_user_points(user_id: int) -> int:
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("SELECT COALESCE(total_points, 0) FROM users WHERE id=?", (user_id,)) as cur:
-                row = await cur.fetchone()
-                return int(row[0]) if row else 0
-        finally:
-            await db.close()
-
-    async def compute_balances(user_id: int):
-        db = await _sqlite_conn()
-        try:
-            # Approved referrals
-            async with db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='APPROVED'", (user_id,)) as cur:
-                approved = (await cur.fetchone())[0]
-            # Gross earned
-            gross = approved * 100  # You may want to use COMMISSION_PER_APPROVED_CENTS from env
-            # Paid out
-            async with db.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=? AND status='PAID'", (user_id,)) as cur:
-                paid = (await cur.fetchone())[0]
-            # Pending withdrawals
-            async with db.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=? AND status IN ('REQUESTED','APPROVED')", (user_id,)) as cur:
-                pending = (await cur.fetchone())[0]
-            return approved, gross, paid, pending
-        finally:
-            await db.close()
-    import aiosqlite
-
-    DB_PATH = os.getenv("DB_PATH") or "./data/codes.db"
-
-    async def _sqlite_conn():
-        os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-        conn = await aiosqlite.connect(DB_PATH)
-        await conn.execute("PRAGMA journal_mode=WAL;")
-        await conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.row_factory = aiosqlite.Row
-        return conn
-
-    async def init_db():
-        db = await _sqlite_conn()
-        try:
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                code TEXT UNIQUE NOT NULL,
-                phone TEXT,
-                created_at TEXT DEFAULT (datetime('now'))
-            );
-            """)
-            await db.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                campaign_id TEXT NOT NULL,
-                referrer_id INTEGER NOT NULL,
-                referee_id INTEGER NOT NULL,
-                ref_code TEXT NOT NULL,
-                created_at TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (campaign_id, referee_id),
-                CHECK (referrer_id <> referee_id)
-            );
-            """)
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (campaign_id, referrer_id);")
-            await db.execute("CREATE INDEX IF NOT EXISTS idx_users_code ON users (code);")
-            await db.commit()
-        finally:
-            await db.close()
-
-    async def upsert_user(user_id: int, code: str, phone: Optional[str]):
-        db = await _sqlite_conn()
-        try:
-            await db.execute("""
-            INSERT INTO users (id, code, phone) VALUES (?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET code=excluded.code, phone=excluded.phone;
-            """, (user_id, code, phone))
-            await db.commit()
-        finally:
-            await db.close()
-
-    async def get_existing_code_by_user(user_id: int) -> Optional[str]:
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("SELECT code FROM users WHERE id = ?;", (user_id,)) as cur:
-                row = await cur.fetchone()
-                return row["code"] if row else None
-        finally:
-            await db.close()
-
-    async def find_user_by_code(code: str) -> Optional[int]:
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("SELECT id FROM users WHERE code = ?;", (code,)) as cur:
-                row = await cur.fetchone()
-                return int(row["id"]) if row else None
-        finally:
-            await db.close()
-
-    async def referee_already_referred(campaign_id: str, referee_id: int) -> bool:
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("""
-            SELECT 1 FROM referrals WHERE campaign_id = ? AND referee_id = ?;
-            """, (campaign_id, referee_id)) as cur:
-                return (await cur.fetchone()) is not None
-        finally:
-            await db.close()
-
-    async def is_reciprocal_referral(campaign_id: str, referee_id: int, referrer_id: int) -> bool:
-        db = await _sqlite_conn()
-        try:
-            async with db.execute("""
-            SELECT 1 FROM referrals
-            WHERE campaign_id = ? AND referrer_id = ? AND referee_id = ?;
-            """, (campaign_id, referee_id, referrer_id)) as cur:
-                return (await cur.fetchone()) is not None
-        finally:
-            await db.close()
-
-    async def insert_referral(campaign_id: str, referrer_id: int, referee_id: int, ref_code: str):
-        db = await _sqlite_conn()
-        try:
-            await db.execute("""
-            INSERT INTO referrals (campaign_id, referrer_id, referee_id, ref_code)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(campaign_id, referee_id) DO NOTHING;
-            """, (campaign_id, referrer_id, referee_id, ref_code))
-            await db.commit()
-        finally:
-            await db.close()
-
+# Devuelve la campaña activa para un usuario (puedes ajustar la lógica según tu modelo de campañas)
+async def get_active_campaign_for_user(user_id: int):
+    async with await _pg_conn() as conn, conn.cursor() as cur:
+        # Ejemplo: retorna la campaña activa más reciente asociada al usuario
+        await cur.execute("""
+            SELECT c.* FROM campaigns c
+            JOIN users u ON u.id = %s
+            WHERE c.client_id = u.client_id AND c.status = 'ACTIVE'
+            ORDER BY c.created_at DESC LIMIT 1;
+        """, (user_id,))
+        row = await cur.fetchone()
+        if row:
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+        return None
 # ==============================
 # Backend: PostgreSQL (psycopg3)
 # ==============================
-else:
-    async def get_default_method(user_id: int):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT * FROM payout_methods WHERE user_id=%s AND is_default=1 LIMIT 1", (user_id,))
-            row = await cur.fetchone()
-            if row:
-                columns = [desc[0] for desc in cur.description]
-                return dict(zip(columns, row))
-            return None
+import os
+from typing import Optional
+import psycopg_pool
+from psycopg.rows import tuple_row
+import logging
 
-    async def create_withdraw_request(user_id: int, amount_cents: int, method_id: int):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("Missing DATABASE_URL for postgres backend")
+
+# Pool global
+pool = psycopg_pool.AsyncConnectionPool(DATABASE_URL, min_size=2, max_size=10, open=True)
+
+logger = logging.getLogger(__name__)
+
+async def get_conn():
+    return await pool.getconn()
+
+async def get_default_method(user_id: int, campaign_id: int = None):
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT * FROM payout_methods WHERE user_id=%s AND is_default=1 LIMIT 1", (user_id,))
+        row = await cur.fetchone()
+        if row:
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+        return None
+
+async def create_withdraw_request(user_id: int, amount_cents: int, method_id: int, campaign_id: int = None):
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "INSERT INTO payments (user_id, amount_cents, status, method_id, requested_at) VALUES (%s, %s, 'REQUESTED', %s, now()) RETURNING id",
                 (user_id, amount_cents, method_id)
             )
             row = await cur.fetchone()
             await conn.commit()
+            logger.info(f"Withdraw request created for user {user_id} amount {amount_cents}")
             return int(row[0])
-    async def get_code_by_phone(phone_e164: str):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
+    except Exception as e:
+        logger.error(f"Error creating withdraw request for user {user_id}: {e}")
+        raise
+
+async def get_code_by_phone(phone_e164: str):
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT id, code FROM users WHERE phone=%s", (phone_e164,))
             row = await cur.fetchone()
             return (row[0], row[1]) if row else None
-    async def get_user_points(user_id: int) -> int:
-        async with await _pg_conn() as conn, conn.cursor() as cur:
+    except Exception as e:
+        logger.error(f"Error getting code by phone {phone_e164}: {e}")
+        return None
+
+async def get_user_points(user_id: int, campaign_id: int = None) -> int:
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT COALESCE(total_points, 0) FROM users WHERE id=%s", (user_id,))
             row = await cur.fetchone()
             return int(row[0]) if row else 0
+    except Exception as e:
+        logger.error(f"Error getting points for user {user_id}: {e}")
+        return 0
 
-    async def compute_balances(user_id: int):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            # Approved referrals
-            await cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=%s AND status='APPROVED'", (user_id,))
+async def compute_balances(user_id: int, campaign_id: int, commission_per_approved_cents: int):
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=%s AND campaign_id=%s AND status='APPROVED'", (user_id, campaign_id))
             approved = (await cur.fetchone())[0]
-            # Gross earned
-            gross = approved * 100  # You may want to use COMMISSION_PER_APPROVED_CENTS from env
-            # Paid out
+            gross = approved * commission_per_approved_cents
             await cur.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=%s AND status='PAID'", (user_id,))
             paid = (await cur.fetchone())[0]
-            # Pending withdrawals
             await cur.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE user_id=%s AND status IN ('REQUESTED','APPROVED')", (user_id,))
             pending = (await cur.fetchone())[0]
             return approved, gross, paid, pending
-    import psycopg
-    from psycopg.rows import tuple_row
+    except Exception as e:
+        logger.error(f"Error computing balances for user {user_id}: {e}")
+        return 0, 0, 0, 0
 
-    DATABASE_URL = os.getenv("DATABASE_URL")
-
-    async def _pg_conn():
-        if not DATABASE_URL:
-            raise RuntimeError("Missing DATABASE_URL for postgres backend")
-        return await psycopg.AsyncConnection.connect(DATABASE_URL, row_factory=tuple_row)
-
-    async def init_db():
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY,
-                code TEXT UNIQUE NOT NULL,
-                phone TEXT,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-            """)
-            await cur.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                campaign_id TEXT NOT NULL,
-                referrer_id BIGINT NOT NULL,
-                referee_id BIGINT NOT NULL,
-                ref_code TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT now(),
-                CONSTRAINT referrals_pk PRIMARY KEY (campaign_id, referee_id),
-                CONSTRAINT no_self_referral CHECK (referrer_id <> referee_id)
-            );
-            """)
-            await cur.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (campaign_id, referrer_id);")
-            await cur.execute("CREATE INDEX IF NOT EXISTS idx_users_code ON users (code);")
+async def init_db():
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT PRIMARY KEY,
+            code TEXT UNIQUE NOT NULL,
+            phone TEXT,
+            email TEXT,
+            total_points INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+        await cur.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            campaign_id TEXT NOT NULL,
+            referrer_id BIGINT NOT NULL,
+            referee_id BIGINT NOT NULL,
+            ref_code TEXT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            CONSTRAINT referrals_pk PRIMARY KEY (campaign_id, referee_id),
+            CONSTRAINT no_self_referral CHECK (referrer_id <> referee_id)
+        );
+        """)
+        await cur.execute("CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (campaign_id, referrer_id);")
+        await cur.execute("CREATE INDEX IF NOT EXISTS idx_users_code ON users (code);")
+        await cur.execute("""
+        CREATE TABLE IF NOT EXISTS points_history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            campaign_id TEXT,
+            points INTEGER NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMPTZ DEFAULT now()
+        );
+        """)
+        await conn.commit()
+# Award points to a user and log the transaction
+async def add_points(user_id: int, points: int, reason: str, campaign_id: str = None):
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            # Update user's total_points
+            await cur.execute(
+                "UPDATE users SET total_points = COALESCE(total_points, 0) + %s WHERE id = %s;",
+                (points, user_id)
+            )
+            # Log in points_history
+            await cur.execute(
+                "INSERT INTO points_history (user_id, campaign_id, points, reason) VALUES (%s, %s, %s, %s);",
+                (user_id, campaign_id, points, reason)
+            )
             await conn.commit()
+            logger.info(f"Added {points} points to user {user_id} for {reason} (campaign={campaign_id})")
+    except Exception as e:
+        logger.error(f"Error adding points to user {user_id}: {e}")
+        raise
 
-    async def upsert_user(user_id: int, code: str, phone: Optional[str]):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("""
-            INSERT INTO users (id, code, phone) VALUES (%s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, phone = EXCLUDED.phone;
-            """, (user_id, code, phone))
+async def upsert_user(user_id: int, code: str = None, phone: Optional[str] = None, email: Optional[str] = None):
+    try:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            fields = ["id"]
+            values = [user_id]
+            updates = []
+            if code is not None:
+                fields.append("code")
+                values.append(code)
+                updates.append("code = EXCLUDED.code")
+            if phone is not None:
+                fields.append("phone")
+                values.append(phone)
+                updates.append("phone = EXCLUDED.phone")
+            if email is not None:
+                fields.append("email")
+                values.append(email)
+                updates.append("email = EXCLUDED.email")
+            sql = f"INSERT INTO users ({', '.join(fields)}) VALUES ({', '.join(['%s']*len(fields))}) "
+            if updates:
+                sql += f"ON CONFLICT (id) DO UPDATE SET {', '.join(updates)};"
+            else:
+                sql += "ON CONFLICT (id) DO NOTHING;"
+            await cur.execute(sql, tuple(values))
             await conn.commit()
+            logger.info(f"Upserted user {user_id}")
+    except Exception as e:
+        logger.error(f"Error upserting user {user_id}: {e}")
+        raise
 
-    async def get_existing_code_by_user(user_id: int) -> Optional[str]:
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT code FROM users WHERE id = %s;", (user_id,))
-            row = await cur.fetchone()
-            return row[0] if row else None
+async def get_existing_code_by_user(user_id: int) -> Optional[str]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT code FROM users WHERE id = %s;", (user_id,))
+        row = await cur.fetchone()
+        return row[0] if row else None
 
-    async def find_user_by_code(code: str) -> Optional[int]:
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("SELECT id FROM users WHERE code = %s;", (code,))
-            row = await cur.fetchone()
-            return int(row[0]) if row else None
+async def find_user_by_code(code: str) -> Optional[int]:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT id FROM users WHERE code = %s;", (code,))
+        row = await cur.fetchone()
+        return int(row[0]) if row else None
 
-    async def referee_already_referred(campaign_id: str, referee_id: int) -> bool:
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("""
-            SELECT 1 FROM referrals WHERE campaign_id = %s AND referee_id = %s;
-            """, (campaign_id, referee_id))
-            return (await cur.fetchone()) is not None
+async def referee_already_referred(campaign_id: str, referee_id: int) -> bool:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("""
+        SELECT 1 FROM referrals WHERE campaign_id = %s AND referee_id = %s;
+        """, (campaign_id, referee_id))
+        return (await cur.fetchone()) is not None
 
-    async def is_reciprocal_referral(campaign_id: str, referee_id: int, referrer_id: int) -> bool:
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("""
-            SELECT 1 FROM referrals
-            WHERE campaign_id = %s AND referrer_id = %s AND referee_id = %s;
-            """, (campaign_id, referee_id, referrer_id))
-            return (await cur.fetchone()) is not None
+async def is_reciprocal_referral(campaign_id: str, referee_id: int, referrer_id: int) -> bool:
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("""
+        SELECT 1 FROM referrals
+        WHERE campaign_id = %s AND referrer_id = %s AND referee_id = %s;
+        """, (campaign_id, referrer_id, referee_id))
+        return (await cur.fetchone()) is not None
 
-    async def insert_referral(campaign_id: str, referrer_id: int, referee_id: int, ref_code: str):
-        async with await _pg_conn() as conn, conn.cursor() as cur:
-            await cur.execute("""
-            INSERT INTO referrals (campaign_id, referrer_id, referee_id, ref_code)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (campaign_id, referee_id) DO NOTHING;
-            """, (campaign_id, referrer_id, referee_id, ref_code))
-            await conn.commit()
+async def insert_referral(campaign_id: str, referrer_id: int, referee_id: int, ref_code: str):
+    try:
+        async with pool.connection() as conn:
+            async with conn.transaction():
+                async with conn.cursor() as cur:
+                    await cur.execute("""
+                    INSERT INTO referrals (campaign_id, referrer_id, referee_id, ref_code)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (campaign_id, referee_id) DO NOTHING;
+                    """, (campaign_id, referrer_id, referee_id, ref_code))
+                logger.info(f"Referral inserted: campaign={campaign_id}, referrer={referrer_id}, referee={referee_id}")
+    except Exception as e:
+        logger.error(f"Error inserting referral: campaign={campaign_id}, referrer={referrer_id}, referee={referee_id}, error={e}")
+        raise
+
+# --- Migration SQL for existing databases ---
+# DEPRECATED: All DB logic has moved to services/db_service.py
+# Please import from services.db_service instead.
