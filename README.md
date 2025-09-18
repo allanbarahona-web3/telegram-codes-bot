@@ -1,28 +1,33 @@
 # Telegram Codes Bot
 
-A Telegram bot that assigns each user a unique referral code based on their verified phone number.  
-It supports referral campaigns, provides invite links to groups that are one-time use and expire automatically, and includes **CSV export** for admins.
+A production-ready Telegram referral bot for campaigns, unique codes, group access control, and admin CSV export.
 
 ---
 
-## ✨ Features
-- **Unique user codes:** each user receives a random, unique code with a country prefix (e.g., `CR-AB12-CD34`).
-- **Phone verification:** users must share their phone number via Telegram’s native contact button.
-- **Code recovery:** retrieve your code anytime with `/mycode` or the inline button 🔑 *Remember my code*.
-- **Referral campaigns:** track inviter/invitee relationships in the database.
-- **Group access control:** invite links are single-use and expire after a defined TTL.
-- **CSV Export (admin only):** `/exportcsv` generates three CSVs in the `exports/` folder (`users-<ts>.csv`, `referrals-<ts>.csv`, `campaigns-<ts>.csv`).
+## ✨ Main Features
+
+- **Unique user codes:** Automatic generation with country prefix (e.g., `CR-AB12-CD34`).
+- **Phone verification:** Only users with a verified phone can participate.
+- **Code recovery:** `/mycode` command and “Remember my code” button.
+- **Referral campaigns:** Track invitations and points per campaign.
+- **Group access control:** One-time, expiring invite links.
+- **Withdrawals and balance:** Request withdrawals, view history, and balance validations.
+- **CSV export (admin):** `/exportcsv` for users, referrals, and campaigns.
+- **Multilanguage support:** English and Spanish.
+- **Flexible configuration:** Environment variables for region, currency, commissions, etc.
 
 ---
 
 ## ⚙️ Requirements
+
 - Python 3.10+
 - pip
+- PostgreSQL (recommended for production)
 - virtualenv (optional)
 
 ---
 
-## 🔧 Installation
+## � Installation & Configuration
 
 ```bash
 git clone https://github.com/<your-username>/telegram-codes-bot.git
@@ -30,54 +35,61 @@ cd telegram-codes-bot
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
 
-🔑 Configuration
+Create a `.env` file in the root folder with:
 
-Create a .env file in the root folder with:
-
+```
 TELEGRAM_BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx
 DEFAULT_REGION=UNKN
 GROUP_CHAT_ID=-1001234567890
 INVITE_TTL_HOURS=12
 ADMIN_USER_IDS=123456789
+DATABASE_URL=postgresql+psycopg://user:pass@host:port/dbname
+CURRENCY=USD
+COMMISSION_PER_APPROVED_CENTS=100
+MIN_WITHDRAW_CENTS=2500
+```
 
+---
 
-TELEGRAM_BOT_TOKEN: your bot token from BotFather
+## ▶️ Running the Bot
 
-DEFAULT_REGION: fallback prefix if number has no country code
+```bash
+python main.py
+```
 
-GROUP_CHAT_ID: target group’s chat_id (bot must be admin)
+---
 
-INVITE_TTL_HOURS: invite link lifetime (hours)
+## �️ Database Schema
 
-ADMIN_USER_IDS: comma-separated Telegram IDs with admin rights
+- **users:** id, phone, code, email, total_points, created_at, country_code
+- **referrals:** campaign_id, referrer_id, referee_id, ref_code, created_at
+- **campaigns:** id, client_id, name, status, created_at
+- **points_history:** id, user_id, campaign_id, points, reason, created_at
+- **payments:** id, user_id, amount_cents, status, method_id, requested_at
 
-▶️ Running the bot
-python telegram_referrals_bot.py
+---
 
-🗃️ Database schema
+## 📊 Analytics & Export
 
-users
+- Codes include country prefix (CR, MX, US, UNKN).
+- CSV export for users, referrals, and campaigns.
+- Balance and referral queries per campaign.
 
-user_id, phone, code, assigned_at, country_code
+---
 
+## 🧪 Testing & QA
 
-referrals
+- Automated test coverage for business logic, edge cases, concurrency, security, and resource limits.
+- See details and checklist in CHANGELOG.md.
 
-referrer_user_id, referee_user_id
+---
 
+## 📝 Notes
 
-campaigns
-
-id, name, rules...
-
-📊 Analytics
-
-Codes include country prefix (CR, MX, US) or UNKN.
-
-users table stores country_code for reporting.
-
-referrals table enables queries for referral counts.
+- Do not include sensitive data or QA/production environment references in this file.
+- For deployment, review environment variables and database configuration.
 
 CSV export = quick reporting + migration bridge to SaaS.
 
