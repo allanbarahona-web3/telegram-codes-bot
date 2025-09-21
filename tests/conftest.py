@@ -2,6 +2,8 @@
 import pytest
 import pytest_asyncio
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 from services.db_service import open_pool, get_pool
 
 
