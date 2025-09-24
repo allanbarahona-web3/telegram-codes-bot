@@ -27,12 +27,54 @@ def load_config():
 	}
 
 def get_texts():
-	# Import or define your TEXTS dict here, or load from a file
-	return {}
+	# Diccionario de textos traducidos
+	return {
+		"your_points": {"es": "Tus puntos", "en": "Your points"},
+		"balance_header": {"es": "💰 Tu balance:", "en": "💰 Your balance:"},
+		"balance_body": {
+			"es": (
+				"Referidos aprobados: {approved}\n"
+				"Comisión por referido: {commission}\n"
+				"Bruto ganado: {gross}\n"
+				"Pagado: {paid}\n"
+				"Retiros pendientes: {pending}\n"
+				"\nDisponible ahora: {available}"
+			),
+			"en": (
+				"Approved referrals: {approved}\n"
+				"Commission per referral: {commission}\n"
+				"Gross earned: {gross}\n"
+				"Paid out: {paid}\n"
+				"Pending withdrawals: {pending}\n"
+				"\nAvailable now: {available}"
+			)
+		},
+		   "withdraw_created": {
+			   "es": "✅ Su retiro se está procesando. Le contactaremos pronto.",
+			   "en": "✅ Your withdrawal is being processed. We will contact you soon."
+		   },
+		   "confirm_account": {
+			   "es": "¿Confirmas que este es tu dato de {method}: {account}?",
+			   "en": "Do you confirm this {method} account: {account}?"
+		   },
+		"mycode_has": {"es": "Tu código de referido es:", "en": "Your referral code is:"},
+		"mycode_missing": {"es": "No tienes código asignado.", "en": "You have no code assigned."},
+		"start_mobile_only": {"es": "¡Bienvenido! Usa los comandos para interactuar con el bot.", "en": "Welcome! Use the commands to interact with the bot."},
+		"group_access": {"es": "Acceso al grupo: {link}", "en": "Group access: {link}"},
+		"your_affiliate_link": {"es": "Tu link de referido: {link}", "en": "Your affiliate link: {link}"},
+		"help": {"es": "Comandos disponibles:\n/mypoints - Ver tus puntos\n/balance - Ver tu balance\n/withdraw - Retirar\n/mycode - Ver tu código\n/mylink - Ver tu link de referido\n/group - Acceso al grupo", "en": "Available commands:\n/mypoints - See your points\n/balance - See your balance\n/withdraw - Withdraw\n/mycode - See your code\n/mylink - See your affiliate link\n/group - Group access"}
+	}
 
 def t(key, lang, **kwargs):
-	# Dummy translation function; replace with your real one
-	return key
+	texts = get_texts()
+	value = texts.get(key, {}).get(lang, key)
+	if kwargs:
+		try:
+			return value.format(**kwargs)
+		except Exception as e:
+			missing = ', '.join([k for k in value.split('{')[1:] if '}' in k and k.split('}')[0] not in kwargs])
+			return f"[ERROR: Missing params: {missing}] {value}"
+	return value
 
 async def main():
 	from services.db_service import open_pool

@@ -1,17 +1,16 @@
 # Telegram Codes Bot
 
-A production-ready Telegram referral bot for campaigns, unique codes, group access control, and admin CSV export.
+A production-ready Telegram referral bot for campaigns, with unique codes, group access control, multi-method withdrawals, and robust admin features.
 
 ---
 
 ## ✨ Main Features
 
 - **Unique user codes:** Automatic generation with country prefix (e.g., `CR-AB12-CD34`).
-- **Phone verification:** Only users with a verified phone can participate.
-- **Code recovery:** `/mycode` command and “Remember my code” button.
 - **Referral campaigns:** Track invitations and points per campaign.
 - **Group access control:** One-time, expiring invite links.
 - **Withdrawals and balance:** Request withdrawals, view history, and balance validations.
+- **Multi-method payouts:** PayPal and Binance Pay supported, with exact account/ID recorded per withdrawal.
 - **CSV export (admin):** `/exportcsv` for users, referrals, and campaigns.
 - **Multilanguage support:** English and Spanish.
 - **Flexible configuration:** Environment variables for region, currency, commissions, etc.
@@ -27,7 +26,7 @@ A production-ready Telegram referral bot for campaigns, unique codes, group acce
 
 ---
 
-## � Installation & Configuration
+## 🚀 Installation & Configuration
 
 ```bash
 git clone https://github.com/<your-username>/telegram-codes-bot.git
@@ -42,7 +41,7 @@ Create a `.env` file in the root folder with:
 ```
 TELEGRAM_BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxx
 DEFAULT_REGION=UNKN
-GROUP_CHAT_ID=-1001234567890
+GROUP_CHAT_ID=-1001265465465412321654
 INVITE_TTL_HOURS=12
 ADMIN_USER_IDS=123456789
 DATABASE_URL=postgresql+psycopg://user:pass@host:port/dbname
@@ -61,13 +60,24 @@ python main.py
 
 ---
 
-## �️ Database Schema
+## 🗂️ Database Schema
 
 - **users:** id, phone, code, email, total_points, created_at, country_code
-- **referrals:** campaign_id, referrer_id, referee_id, ref_code, created_at
+- **referrals:** campaign_id, referrer_id, referee_id, ref_code, created_at, status
 - **campaigns:** id, client_id, name, status, created_at
 - **points_history:** id, user_id, campaign_id, points, reason, created_at
-- **payments:** id, user_id, amount_cents, status, method_id, requested_at
+- **payments:** id, user_id, amount_cents, status, method_id, requested_at, paid_at, processed_at, note, account
+- **payout_methods:** id, user_id, method_type, details, is_default
+
+---
+
+## 💸 Withdrawals & Payouts
+
+- Users can request withdrawals via `/withdraw` or `/cobrar`.
+- Supported payout methods: **PayPal** and **Binance Pay**.
+- Each withdrawal records the exact PayPal email or Binance Pay ID used at the time of request.
+- Admins can approve and mark withdrawals as paid.
+- Full audit trail: see to which account/ID each payment was sent.
 
 ---
 
@@ -91,31 +101,16 @@ python main.py
 - Do not include sensitive data or QA/production environment references in this file.
 - For deployment, review environment variables and database configuration.
 
-CSV export = quick reporting + migration bridge to SaaS.
+---
 
-📄 License
+## License
 
 MIT
 
-🧪 QA Freeze / Version
+---
 
-Current QA Freeze: v0.1.0 (QA – do not modify)
+## Version
 
-Tester: Karen (Qase, device testing)
+Current QA Freeze: qa-20250923-1
 
-Scope: referrals core, balance/payouts, admin, ES/EN
-
-Run locally for QA:
-
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python telegram_referrals_bot.py
-
-
-Environment variables:
-
-TELEGRAM_BOT_TOKEN (required)
-
-DATABASE_URL (optional, default: local codes.db)
-
-DEFAULT_LOCALE (es|en)
+---
